@@ -1,2 +1,29 @@
 # iot-sim-ops
-实习综合项目：物联卡查询与生命周期管理；MySQL + Flask/FastAPI + Postman + HTML，含读写分离与运维脚本。
+
+A small end-to-end demo to connect what I learned in the internship:
+Linux + MySQL + API testing (Postman) + HTML, with simple ops (systemd & cron backup).
+
+## What it does
+- Provide SIM-card query API (e.g., monthly data margin) and lifecycle ops (activate/suspend/throttle/terminate).
+- Store data in MySQL; support read/write split at the app layer (demo).
+- Test with Postman collections and data-driven runs.
+- Minimal HTML page for login, query, and quick recharge.
+
+## Tech stack
+Backend: Python (Flask/FastAPI TBD) · DB: MySQL · Test: Postman · Web: HTML+fetch
+
+## Getting started (WIP)
+- `db/` schema & seed SQL (coming soon)
+- `backend/` minimal API (coming soon)
+- `ops/` backup script & systemd unit (coming soon)
+
+## Roadmap (milestones)
+- DB schema & 10k sample SIMs
+- `/v5/ec/query/sim-data-margin` API
+- SIM lifecycle endpoints
+- Postman Runner + CSV
+- systemd + cron backup (keep last 7)
+- HTML page for demo
+
+## License
+MIT
