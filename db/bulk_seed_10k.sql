@@ -9,6 +9,8 @@
 
 USE iot_sim_ops;
 
+SET SESSION cte_max_recursion_depth = 20000;          --修改默认递归深度
+
 SET @N := 10000;                 -- 造数数量
 SET @SEQ_START := 10006;         -- 序号起点（避开 00001~00005）
 SET @SEQ_END := @SEQ_START + @N - 1;
