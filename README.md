@@ -27,3 +27,17 @@ Backend: Python (Flask/FastAPI TBD) · DB: MySQL · Test: Postman · Web: HTML+f
 
 ## License
 MIT
+
+## Repository layout (skeleton)
+- backend/   # Backend source (Flask/FastAPI), configs, logs/
+- db/        # schema.sql, seed.sql, dumps/ (keep last 7)
+- web/       # login.html, index.html
+- ops/       # backup_db.sh, health_check.sh, myapp.service
+- postman/   # collections & environments
+
+## Repository layout (skeleton)
+- backend/   # Backend source (Flask/FastAPI), configs, logs/
+- db/        # schema.sql, seed.sql, dumps/ (keep last 7)
+- web/       # login.html, index.html
+- ops/       # backup_db.sh, health_check.sh, myapp.service
+- postman/   # collections & environments
