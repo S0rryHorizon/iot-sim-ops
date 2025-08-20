@@ -14,17 +14,38 @@ INSERT INTO offering (offering_id, name, total_kb) VALUES
 ON DUPLICATE KEY UPDATE name=VALUES(name), total_kb=VALUES(total_kb);
 
 -- 示例卡（5张，覆盖不同状态/场景）
-INSERT INTO sim_card (iccid, msisdn, imsi, status, throttle_kbps, is_shared_pool, offering_ref, owner, activated_at, terminated_at)
-SELECT * FROM (
-  SELECT '89860000000000000001','14765004176','460079650004176', 1, NULL,  FALSE, (SELECT id FROM offering WHERE offering_id='21000032'),'alice', NOW(), NULL UNION ALL -- ACTIVE
-  SELECT '89860000000000000002','14765004177','460079650004177', 2, NULL,  FALSE, (SELECT id FROM offering WHERE offering_id='21000032'),'bob',   NOW(), NULL UNION ALL -- SUSPENDED
-  SELECT '89860000000000000003','14765004178','460079650004178', 3, 128,   FALSE, (SELECT id FROM offering WHERE offering_id='21000064'),'carol', NOW(), NULL UNION ALL -- THROTTLED 128kbps
-  SELECT '89860000000000000004','14765004179','460079650004179', 4, NULL,  FALSE, (SELECT id FROM offering WHERE offering_id='21000032'),'diana', NOW(), NOW() UNION ALL -- TERMINATED
-  SELECT '89860000000000000005','14765004180','460079650004180', 1, NULL,   TRUE, (SELECT id FROM offering WHERE offering_id='21000064'),'ed',    NOW(), NULL          -- ACTIVE + 共享池
-) AS t
-ON DUPLICATE KEY UPDATE status=VALUES(status), throttle_kbps=VALUES(throttle_kbps),
-  is_shared_pool=VALUES(is_shared_pool), offering_ref=VALUES(offering_ref),
-  owner=VALUES(owner), activated_at=VALUES(activated_at), terminated_at=VALUES(terminated_at);
+INSERT INTO sim_card (
+  iccid, msisdn, imsi, status, throttle_kbps, is_shared_pool,
+  offering_ref, owner, activated_at, terminated_at
+)
+SELECT
+  '89860000000000000001' AS iccid,
+  '14765004176' AS msisdn,
+  '460079650004176' AS imsi,
+  1 AS status,
+  NULL AS throttle_kbps,
+  FALSE AS is_shared_pool,
+  (SELECT id FROM offering WHERE offering_id='21000032') AS offering_ref,
+  'alice' AS owner,
+  NOW() AS activated_at,
+  NULL AS terminated_at
+UNION ALL
+SELECT '89860000000000000002','14765004177','460079650004177', 2, NULL, FALSE,(SELECT id FROM offering WHERE offering_id='21000032'),'bob',   NOW(), NULL
+UNION ALL
+SELECT '89860000000000000003','14765004178','460079650004178', 3, 128,  FALSE,(SELECT id FROM offering WHERE offering_id='21000064'),'carol', NOW(), NULL
+UNION ALL
+SELECT '89860000000000000004','14765004179','460079650004179', 4, NULL, FALSE,(SELECT id FROM offering WHERE offering_id='21000032'),'diana', NOW(), NOW()
+UNION ALL
+SELECT '89860000000000000005','14765004180','460079650004180', 1, NULL, TRUE, (SELECT id FROM offering WHERE offering_id='21000064'),'ed',    NOW(), NULL
+ON DUPLICATE KEY UPDATE
+  status=VALUES(status),
+  throttle_kbps=VALUES(throttle_kbps),
+  is_shared_pool=VALUES(is_shared_pool),
+  offering_ref=VALUES(offering_ref),
+  owner=VALUES(owner),
+  activated_at=VALUES(activated_at),
+  terminated_at=VALUES(terminated_at);
+
 
 -- 当月用量（0~70%）
 INSERT INTO usage_monthly (sim_id, month, use_kb, updated_at)
