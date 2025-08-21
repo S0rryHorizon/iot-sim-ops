@@ -73,19 +73,32 @@ def auth_login(body: Login):
         if not bcrypt.checkpw(body.password.encode("utf-8"), user["password_hash"].encode("utf-8")):
             raise HTTPException(status_code=401, detail="invalid credential")
 
-        # 生成 token（opaque）并绑定用户
+        # 生成 token，并绑定到用户；显式写 appid 与 created_at，更兼容
         cur.execute("SELECT LPAD(SUBSTRING(SHA2(UUID(),256),1,64),64,'a') AS tok")
         tok = cur.fetchone()["tok"]
-        cur.execute(
-            "INSERT INTO auth_token(token, user_id, expires_at) VALUES (%s, %s, DATE_ADD(NOW(), INTERVAL 1 HOUR))",
-            (tok, user["user_id"])
-        )
-        cur.execute("UPDATE user_account SET last_login_at=NOW() WHERE user_id=%s", (user["user_id"],))
-        conn.commit()
 
-    return {"code": "0", "msg": "ok",
-            "data": {"token": tok, "token_type": "Bearer", "expires_in": 3600},
-            "trace": {"transid": "login"}}
+        try:
+            cur.execute(
+                """
+                INSERT INTO auth_token (token, user_id, appid, expires_at, created_at)
+                VALUES (%s, %s, %s, DATE_ADD(NOW(), INTERVAL 1 HOUR), NOW())
+                """,
+                (tok, user["user_id"], None),
+            )
+            cur.execute("UPDATE user_account SET last_login_at=NOW() WHERE user_id=%s", (user["user_id"],))
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            print("DB ERROR on /auth/login:", repr(e))
+            raise HTTPException(status_code=500, detail=f"DB_ERROR:{e.__class__.__name__}")
+
+    return {
+        "code": "0",
+        "msg": "ok",
+        "data": {"token": tok, "token_type": "Bearer", "expires_in": 3600},
+        "trace": {"transid": "login"},
+    }
+
 
 @app.get("/sims/{iccid}/usage")
 def usage(iccid: str, month: str, authorization: str | None = Header(None)):
