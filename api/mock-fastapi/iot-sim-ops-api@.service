@@ -1,0 +1,13 @@
+[Unit]
+Description=iot-sim-ops FastAPI
+After=network.target mysql.service
+
+[Service]
+User=%i
+WorkingDirectory=%h/iot-sim-ops-api
+EnvironmentFile=%h/iot-sim-ops-api/.env
+ExecStart=%h/iot-sim-ops-api/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

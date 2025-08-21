@@ -1,0 +1,254 @@
+{
+	"info": {
+		"_postman_id": "52d32efe-253b-41e5-bbc2-cc91f64784a1",
+		"name": "iot-sim-ops (MVP)",
+		"description": "Auth + Usage + Purchase + SIM Status (opaque token, 1h TTL).",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "47619978"
+	},
+	"item": [
+		{
+			"name": "Auth: Get Token",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test('HTTP 200', () => pm.response.code === 200);",
+							"const json = pm.response.json();",
+							"pm.test('business code ok', () => json && (json.code === '0' || json.code === 0));",
+							"pm.test('token present', () => json && json.data && json.data.token);",
+							"if (json && json.data && json.data.token) { pm.environment.set('token', json.data.token); }"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"appid\": \"{{appid}}\",\n  \"password\": \"{{password}}\"\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/auth/token",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"auth",
+						"token"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Usage: Get Monthly Usage",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test('HTTP 200', () => pm.response.code === 200);",
+							"const json = pm.response.json();",
+							"pm.test('business code ok', () => json && (json.code === '0' || json.code === 0));",
+							"pm.test('fields present', () => json && json.data && json.data.remain_mb !== undefined);"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{token}}"
+					}
+				],
+				"url": {
+					"raw": "{{baseUrl}}/sims/{{iccid}}/usage?month={{month}}",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"sims",
+						"{{iccid}}",
+						"usage"
+					],
+					"query": [
+						{
+							"key": "month",
+							"value": "{{month}}"
+						}
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "Purchase: Add-on Package",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('HTTP 200', () => pm.response.code === 200);",
+							"const json = pm.response.json();",
+							"pm.test('business code ok or idempotent', () => json && (json.code === '0' || json.code === 'E_DUP_TRANSID' || json.code === 0));",
+							"pm.test('trace has transid', () => json && json.trace && json.trace.transid);"
+						],
+						"type": "text/javascript",
+						"packages": {}
+					}
+				},
+				{
+					"listen": "prerequest",
+					"script": {
+						"packages": {},
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{token}}"
+					},
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "X-TransId",
+						"value": "20250821T110934-1302"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"month\": \"{{month}}\",\n  \"package_mb\": 1024,\n  \"product_id\": \"pkg_1g\",\n  \"pay_amount_cent\": 1200\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/sims/{{iccid}}/purchase",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"sims",
+						"{{iccid}}",
+						"purchase"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "SIM: Get Status",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test('HTTP 200', () => pm.response.code === 200);",
+							"const json = pm.response.json();",
+							"pm.test('status present', () => json && json.data && json.data.status);"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{token}}"
+					}
+				],
+				"url": {
+					"raw": "{{baseUrl}}/sims/{{iccid}}/status",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"sims",
+						"{{iccid}}",
+						"status"
+					]
+				}
+			},
+			"response": []
+		},
+		{
+			"name": "SIM: Change Status (SUSPEND/RESUME)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"type": "text/javascript",
+						"exec": [
+							"pm.test('HTTP 200', () => pm.response.code === 200);",
+							"const json = pm.response.json();",
+							"pm.test('business code ok', () => json && (json.code === '0' || json.code === 0));",
+							"pm.test('status present', () => json && json.data && json.data.status);"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "PATCH",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{token}}"
+					},
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"action\": \"SUSPEND\"\n}"
+				},
+				"url": {
+					"raw": "{{baseUrl}}/sims/{{iccid}}/status",
+					"host": [
+						"{{baseUrl}}"
+					],
+					"path": [
+						"sims",
+						"{{iccid}}",
+						"status"
+					]
+				}
+			},
+			"response": []
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					"// Generate X-TransId like 20250821T093012-1234",
+					"const pad = n => (''+n).padStart(2,'0');",
+					"const d = new Date();",
+					"const ts = `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;",
+					"const rand = Math.floor(Math.random()*9000)+1000;",
+					"pm.environment.set('transid', `${ts}-${rand}`);"
+				]
+			}
+		}
+	]
+}
