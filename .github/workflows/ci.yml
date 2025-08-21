@@ -1,0 +1,38 @@
+
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [dev]
+
+jobs:
+  db-migrate:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: iot_sim_ops
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -proot || exit 1"
+          --health-interval=10s --health-timeout=5s --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MySQL client
+        run: sudo apt-get update && sudo apt-get install -y mysql-client
+      - name: Wait for MySQL
+        run: |
+          for i in {1..60}; do
+            mysql -h 127.0.0.1 -uroot -proot -e "SELECT 1" && break
+            sleep 2
+          done
+      - name: Apply migrations
+        run: |
+          mysql -h 127.0.0.1 -uroot -proot iot_sim_ops < db/migrations/V001__init_schema.sql
+          mysql -h 127.0.0.1 -uroot -proot iot_sim_ops < db/migrations/V002__seed_demo.sql
+      - name: Sanity checks
+        run: |
+          mysql -h 127.0.0.1 -uroot -proot -e "SELECT COUNT(*) 'sim_cards' FROM iot_sim_ops.sim_card;"
+          mysql -h 127.0.0.1 -uroot -proot -e "SELECT * FROM iot_sim_ops.v_usage_effective LIMIT 3;"
