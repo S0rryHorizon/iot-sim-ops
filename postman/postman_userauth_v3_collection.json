@@ -1,0 +1,215 @@
+{
+  "info": {
+    "name": "iot-sim-ops (UserAuth v3)",
+    "_postman_id": "47d46488-a2bf-4017-9978-333b0632fc2c",
+    "description": "User login + token + per-user SIM scoping.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "User: Login",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/auth/login",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "login"
+          ],
+          "query": []
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}"
+        }
+      }
+    },
+    {
+      "name": "SIM: Search",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/search?iccid={{iccid}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "search?iccid={{iccid}}"
+          ],
+          "query": []
+        }
+      }
+    },
+    {
+      "name": "Usage: Get Monthly Usage",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/{{iccid}}/usage?month={{month}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "{{iccid}}",
+            "usage?month={{month}}"
+          ],
+          "query": []
+        }
+      }
+    },
+    {
+      "name": "SIM: Get Status",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/{{iccid}}/status",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "{{iccid}}",
+            "status"
+          ],
+          "query": []
+        }
+      }
+    },
+    {
+      "name": "SIM: Change Status",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/{{iccid}}/status",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "{{iccid}}",
+            "status"
+          ],
+          "query": []
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"action\": \"SUSPEND\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Purchase: Add-on Package",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-TransId",
+            "value": "{{transid}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/{{iccid}}/purchase",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "{{iccid}}",
+            "purchase"
+          ],
+          "query": []
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"month\": \"{{month}}\",\n  \"package_mb\": 1024,\n  \"product_id\": \"pkg_1g\",\n  \"pay_amount_cent\": 1200\n}"
+        }
+      }
+    },
+    {
+      "name": "SIM: Purchase List",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/{{iccid}}/purchases?month={{month}}&limit=20&offset=0",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "{{iccid}}",
+            "purchases?month={{month}}&limit=20&offset=0"
+          ],
+          "query": []
+        }
+      }
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "const pad = n => (''+n).padStart(2,'0');",
+          "const d = new Date();",
+          "const ts = `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;",
+          "const rand = Math.floor(Math.random()*9000)+1000;",
+          "pm.environment.set('transid', `${ts}-${rand}`);"
+        ]
+      }
+    }
+  ]
+}
