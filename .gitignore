@@ -1,51 +1,30 @@
-# --- Python / Env ---
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
 *.so
 .venv/
 venv/
 .env
 .env.*
-.pdm-python
-.pixi
-__pypackages__/
 
-# --- Packaging / Build ---
-build/
-dist/
-.eggs/
-*.egg-info/
-*.egg
-wheels/
-MANIFEST
-
-# --- Tests / Coverage / Type checkers ---
-.tox/
-.nox/
-.pytest_cache/
-.coverage*
-.hypothesis/
-.mypy_cache/
-.pytype/
-.pyre/
-.ruff_cache/
-.cache/
-
-# --- Docs ---
-docs/_build/
-
-# --- Editors / OS ---
-.DS_Store
-.idea/
-.vscode/
-*.swp
-.ipynb_checkpoints
-
-# --- Logs & dumps ---
+# FastAPI / logs
 *.log
-run.log
-backend/logs/
-db/dumps/
 
-# --- Project specific ---
+# Web
+node_modules/
+dist/
+coverage/
+
+# DB dumps
 *.sql.bak
+*.sql.gz
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Postman local env
+*.postman_environment.local.json
