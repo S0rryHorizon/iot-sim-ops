@@ -1,30 +1,20 @@
-# Python
+# python / fastapi
 __pycache__/
 *.py[cod]
-*.pyo
-*.so
+*.sqlite3
+
+# venv
+api/mock-fastapi/.venv/
 .venv/
-venv/
-.env
-.env.*
 
-# FastAPI / logs
+# logs & local env
+logs/
+api/mock-fastapi/logs/
+scripts/*.log
 *.log
+.env
+api/mock-fastapi/.env
 
-# Web
-node_modules/
-dist/
-coverage/
-
-# DB dumps
-*.sql.bak
-*.sql.gz
-
-# IDE / OS
-.vscode/
-.idea/
+# OS/editor
 .DS_Store
-Thumbs.db
-
-# Postman local env
-*.postman_environment.local.json
+*.swp
