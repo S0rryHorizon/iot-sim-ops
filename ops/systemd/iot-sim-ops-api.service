@@ -1,20 +1,20 @@
-# 做成用户级 systemd 服务（长期后台跑）
-
-mkdir -p ~/.config/systemd/user
-cat > ~/.config/systemd/user/iot-sim-ops-api.service <<'EOF'
 [Unit]
-Description=iot-sim-ops FastAPI (user)
+Description=IoT SIM OPS API (uvicorn)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-WorkingDirectory=/home/fenrir/iot-sim-ops-api
-EnvironmentFile=/home/fenrir/iot-sim-ops-api/.env
-ExecStart=/home/fenrir/iot-sim-ops-api/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
+Type=simple
+User=fenrir
+WorkingDirectory=/home/fenrir/iot-sim-ops/api/mock-fastapi
+# 可选：.env，不存在也不报错（前面有 - 号）
+EnvironmentFile=-/home/fenrir/iot-sim-ops/api/mock-fastapi/.env
+# 用你项目里 venv 的 uvicorn 启动
+ExecStart=/home/fenrir/iot-sim-ops/api/mock-fastapi/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
 Restart=on-failure
+RestartSec=3
+# 补 PATH，避免某些库找不到可执行文件
+Environment=PATH=/home/fenrir/iot-sim-ops/api/mock-fastapi/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 
 [Install]
-WantedBy=default.target
-EOF
-
-systemctl --user daemon-reload
-systemctl --user enable --now iot-sim-ops-api.service
-systemctl --user status iot-sim-ops-api.service
+WantedBy=multi-user.target

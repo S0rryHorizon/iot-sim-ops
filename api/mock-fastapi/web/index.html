@@ -390,7 +390,21 @@
                     }
                 }
             }
-            q('btnRefresh').onclick = fetchStatus;
+            q('btnRefresh').onclick = async() => {
+                const btn = q('btnRefresh');
+                q('opMsg').style.display = 'none';
+                btn.disabled = true;
+                try {
+                    await fetchStatus();
+                    q('opMsg').textContent = '已刷新';
+                    q('opMsg').style.display = 'block';
+                } catch (e) {
+                    q('opMsg').textContent = (e && e.message) || '刷新失败';
+                    q('opMsg').style.display = 'block';
+                } finally {
+                    btn.disabled = false;
+                }
+            };
 
             // 改状态
             async function changeStatus(action) {

@@ -1,0 +1,10 @@
+[Unit]
+Description=Every 10 minutes export iot-sim-ops logs
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

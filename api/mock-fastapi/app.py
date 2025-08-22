@@ -15,12 +15,40 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.encoders import jsonable_encoder
 
-
 # -------- env & app base --------
 # 自动加载与本文件同目录的 .env
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 app = FastAPI(title="iot-sim-ops", version="0.3.0")
+
+# === logging setup（新增） ===
+import sys, time, uuid, logging
+from fastapi import Request  # 新增这个导入
+
+biz_logger = logging.getLogger("biz")
+if not biz_logger.handlers:
+    h = logging.StreamHandler(sys.stdout)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    h.setFormatter(fmt)
+    biz_logger.addHandler(h)
+biz_logger.setLevel(logging.INFO)
+
+@app.middleware("http")
+async def access_log_mw(request: Request, call_next):
+    rid = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    transid = request.headers.get("X-TransId", "")
+    t0 = time.perf_counter()
+    resp = await call_next(request)
+    dur_ms = (time.perf_counter() - t0) * 1000
+    ip = request.client.host if request.client else "-"
+    # 统一的访问日志
+    biz_logger.info(
+        "http method=%s path=%s status=%s dur_ms=%.1f ip=%s rid=%s transid=%s",
+        request.method, request.url.path, resp.status_code, dur_ms, ip, rid, transid
+    )
+    resp.headers["X-Request-Id"] = rid
+    return resp
+# === end logging setup ===
 
 # CORS（同网段演示，简单放开；生产请改白名单）
 app.add_middleware(
@@ -123,6 +151,8 @@ def auth_login(body: Login):
                 (user["user_id"],),
             )
             conn.commit()
+            biz_logger.info("auth.login ok user=%s", body.username)
+
         except Exception as e:
             conn.rollback()
             print("DB ERROR on /auth/login:", repr(e))
@@ -183,6 +213,11 @@ def sim_status(iccid: str, authorization: Optional[str] = Header(None)):
             raise HTTPException(status_code=404, detail="not found")
         if row["owner_user_id"] != user["user_id"]:
             raise HTTPException(status_code=403, detail="forbidden")
+        
+        # >>> 新增：业务日志（就在 return 之前）
+        biz_logger.info("sims.status get iccid=%s user=%s", iccid, user["username"])
+        # <<< 新增结束
+
         return {"code": "0", "msg": "ok", "data": {"iccid": iccid, "status": row["status"]}, "trace": {}}
 
 @app.patch("/sims/{iccid}/status")
@@ -201,6 +236,10 @@ def change_status(iccid: str, body: ChangeStatus, authorization: Optional[str] =
         if row["owner_user_id"] != user["user_id"]:
             raise HTTPException(status_code=403, detail="forbidden")
 
+        # >>> 新增：保存旧状态
+        old_status = row["status"]
+        # <<< 新增结束
+
         try:
             cur.execute("UPDATE sim_card SET status=%s WHERE iccid=%s", (new_status, iccid))
             # 记录操作日志（如果没有该表就忽略报错）
@@ -214,6 +253,14 @@ def change_status(iccid: str, body: ChangeStatus, authorization: Optional[str] =
                 )
             except Exception as _:
                 pass
+
+             # >>> 新增：业务日志（提交前更合适，确保与DB一致）
+            biz_logger.info(
+                "sims.status patch iccid=%s from=%s to=%s user=%s",
+                iccid, old_status, new_status, user["username"]
+            )
+            # <<< 新增结束
+
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -282,6 +329,17 @@ def purchase(iccid: str, body: PurchaseBody, authorization: Optional[str] = Head
                 VALUES (%s, %s, %s, %s, %s, %s, NOW())
                 """,
                 (order_id, iccid, month, pkg, "SUCCESS", transid),
+            )
+            # 同步累计到 sim_usage（本月总套餐 = 原套餐 + 本次加包）
+            cur.execute(
+                """
+                INSERT INTO sim_usage (iccid, month, used_mb, package_mb)
+                VALUES (%s, %s, 0, %s)
+                ON DUPLICATE KEY UPDATE
+                    package_mb = package_mb + VALUES(package_mb),
+                    updated_at = NOW()
+                """,
+            (iccid, month, pkg),
             )
             conn.commit()
         except Exception as e:

@@ -1,0 +1,8 @@
+[Unit]
+Description=Export last 10 minutes logs of iot-sim-ops-api to files
+
+[Service]
+Type=oneshot
+User=fenrir
+WorkingDirectory=/home/fenrir/iot-sim-ops
+ExecStart=/bin/bash -lc '/home/fenrir/iot-sim-ops/scripts/export_logs.sh'
