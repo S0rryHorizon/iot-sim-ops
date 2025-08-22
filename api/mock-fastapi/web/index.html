@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>iot-sim-ops · 控制台</title>
+    <style>
+         :root {
+            --bg: #0b1220;
+            --panel: #0f172a;
+            --muted: #94a3b8;
+            --text: #e5e7eb;
+            --brand: #22c55e;
+            --danger: #ef4444;
+            --warn: #eab308
+        }
+        
+        * {
+            box-sizing: border-box
+        }
+        
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font-family: system-ui, -apple-system, Segoe UI, Roboto
+        }
+        
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 18px;
+            border-bottom: 1px solid #1f2937;
+            background: #0b1220;
+            position: sticky;
+            top: 0
+        }
+        
+        header .brand {
+            font-weight: 800;
+            letter-spacing: .3px
+        }
+        
+        header .right {
+            display: flex;
+            gap: 10px;
+            align-items: center
+        }
+        
+        .token {
+            font-family: ui-monospace, Menlo, Consolas;
+            font-size: 12px;
+            color: var(--muted);
+            max-width: 48vw;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap
+        }
+        
+        main {
+            display: grid;
+            grid-template-columns: 340px 1fr;
+            gap: 16px;
+            padding: 16px
+        }
+        
+        .panel {
+            background: var(--panel);
+            border: 1px solid #1f2937;
+            border-radius: 16px;
+            padding: 16px
+        }
+        
+        h2 {
+            margin: 0 0 12px;
+            font-size: 16px;
+            color: #cbd5e1
+        }
+        
+        label {
+            display: block;
+            font-size: 12px;
+            color: var(--muted);
+            margin-top: 8px
+        }
+        
+        input,
+        select {
+            width: 100%;
+            padding: 10px;
+            border-radius: 10px;
+            border: 1px solid #334155;
+            background: #0b1220;
+            color: #e5e7eb
+        }
+        
+        button {
+            padding: 10px 14px;
+            border: 0;
+            border-radius: 10px;
+            background: var(--brand);
+            color: #052e16;
+            font-weight: 700;
+            cursor: pointer
+        }
+        
+        .row {
+            display: flex;
+            gap: 8px;
+            align-items: center
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px
+        }
+        
+        .muted {
+            color: var(--muted);
+            font-size: 12px
+        }
+        
+        .status {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 8px;
+            border-radius: 999px;
+            font-size: 12px
+        }
+        
+        .ok {
+            background: #052e16;
+            color: #86efac;
+            border: 1px solid #14532d
+        }
+        
+        .bad {
+            background: #3b0a0a;
+            color: #fecaca;
+            border: 1px solid #7f1d1d
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse
+        }
+        
+        th,
+        td {
+            padding: 8px 6px;
+            border-bottom: 1px solid #1f2937;
+            font-size: 13px;
+            text-align: left
+        }
+        
+        .danger {
+            background: var(--danger);
+            color: #fff
+        }
+        
+        .warn {
+            background: var(--warn);
+            color: #1f2937
+        }
+        
+        .ghost {
+            background: #1f2937;
+            color: #cbd5e1
+        }
+        
+        .actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap
+        }
+        
+        .notice {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 10px;
+            border: 1px dashed #334155;
+            color: #cbd5e1
+        }
+        
+        .wide {
+            grid-column: 1 / span 2
+        }
+        
+        .righty {
+            display: flex;
+            justify-content: flex-end
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <div class="brand">iot-sim-ops 控制台</div>
+        <div class="right">
+            <div class="token" id="tokenPreview">未登录</div>
+            <button class="ghost" id="copyBtn">复制Token</button>
+            <button class="warn" id="logoutBtn">退出</button>
+        </div>
+    </header>
+
+    <main>
+        <section class="panel">
+            <h2>查询我的卡（任一字段）</h2>
+            <label>ICCID</label>
+            <input id="iccid" placeholder="8986..." />
+            <label>IMSI</label>
+            <input id="imsi" placeholder="4600..." />
+            <label>MSISDN</label>
+            <input id="msisdn" placeholder="1xxxxxxxxxx" />
+            <div class="row" style="margin-top:12px">
+                <button id="searchBtn">搜索</button>
+                <span class="muted">只会返回属于当前登录用户的卡</span>
+            </div>
+            <div id="searchMsg" class="muted" style="margin-top:8px"></div>
+        </section>
+
+        <section class="panel">
+            <h2>卡信息</h2>
+            <div id="simInfo" class="muted">尚未选择卡</div>
+            <div class="actions" style="margin-top:10px">
+                <button id="btnRefresh" class="ghost">刷新状态</button>
+                <button id="btnSuspend" class="warn">停机（SUSPEND）</button>
+                <button id="btnResume">复机（RESUME）</button>
+            </div>
+            <div class="notice" id="opMsg" style="display:none"></div>
+        </section>
+
+        <section class="panel wide">
+            <h2>用量 / 订购</h2>
+            <div class="grid">
+                <div>
+                    <label>月份（YYYY-MM）</label>
+                    <input id="month" />
+                </div>
+                <div>
+                    <label>加包（MB）</label>
+                    <div class="row">
+                        <input id="pkgMb" value="1024" />
+                        <button id="btnBuy">购买</button>
+                    </div>
+                </div>
+            </div>
+            <div class="row righty" style="margin-top:8px"><button id="btnUsage" class="ghost">查询当月用量</button></div>
+            <div id="usageBox" class="muted" style="margin-top:8px"></div>
+            <h3 style="margin-top:16px">订单记录</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>订单号</th>
+                        <th>月份</th>
+                        <th>套餐(MB)</th>
+                        <th>状态</th>
+                        <th>时间</th>
+                    </tr>
+                </thead>
+                <tbody id="orders"></tbody>
+            </table>
+        </section>
+    </main>
+
+    <script>
+        window.addEventListener('DOMContentLoaded', () => {
+            const baseUrl = location.origin;
+            const q = (id) => document.getElementById(id);
+            const token = localStorage.getItem('token');
+            const loginUser = localStorage.getItem('loginUser') || '';
+
+            if (!token) {
+                location.href = `${baseUrl}/web/login.html`;
+                return;
+            }
+
+            // 顶部信息
+            q('tokenPreview').textContent = `用户：${loginUser} · ${token}`;
+
+            // 复制 Token（在非 https/localhost 下可能受限，做降级）
+            q('copyBtn').onclick = async() => {
+                try {
+                    if (navigator.clipboard && window.isSecureContext) {
+                        await navigator.clipboard.writeText(token);
+                        alert('已复制');
+                    } else {
+                        const ta = document.createElement('textarea');
+                        ta.value = token;
+                        document.body.appendChild(ta);
+                        ta.select();
+                        document.execCommand('copy');
+                        document.body.removeChild(ta);
+                        alert('已复制');
+                    }
+                } catch (e) {
+                    alert('复制失败');
+                    console.error(e);
+                }
+            };
+
+            // 退出
+            q('logoutBtn').onclick = () => {
+                localStorage.clear();
+                location.href = `${baseUrl}/web/login.html`;
+            };
+
+            // helpers
+            const H = {
+                j: async(res) => {
+                    const t = await res.text();
+                    try {
+                        return JSON.parse(t);
+                    } catch {
+                        throw new Error(t || `HTTP ${res.status}`);
+                    }
+                },
+                auth: () => ({
+                    'Authorization': `Bearer ${token}`
+                })
+            };
+
+            // state
+            let currentIccid = '';
+
+            // 默认填当月
+            const m = new Date();
+            q('month').value = `${m.getFullYear()}-${String(m.getMonth()+1).padStart(2,'0')}`;
+
+            // 搜索
+            q('searchBtn').onclick = async() => {
+                const iccid = q('iccid').value.trim();
+                const imsi = q('imsi').value.trim();
+                const msisdn = q('msisdn').value.trim();
+                const qs = new URLSearchParams();
+                if (iccid) qs.set('iccid', iccid);
+                if (imsi) qs.set('imsi', imsi);
+                if (msisdn) qs.set('msisdn', msisdn);
+                if (!qs.toString()) {
+                    q('searchMsg').textContent = '请至少输入一个字段';
+                    return;
+                }
+                q('searchMsg').textContent = '查询中...';
+                try {
+                    const res = await fetch(`${baseUrl}/sims/search?${qs.toString()}`, {
+                        headers: {...H.auth()
+                        }
+                    });
+                    const j = await H.j(res);
+                    if (!res.ok) throw new Error(j.detail || j.msg || '查询失败');
+                    const d = j.data;
+                    currentIccid = d.iccid;
+                    q('searchMsg').textContent = '';
+                    q('simInfo').innerHTML = `
+            <div class="grid">
+              <div><div class="muted">ICCID</div><div>${d.iccid||'-'}</div></div>
+              <div><div class="muted">IMSI</div><div>${d.imsi||'-'}</div></div>
+              <div><div class="muted">MSISDN</div><div>${d.msisdn||'-'}</div></div>
+              <div><div class="muted">状态</div><div class="status ${d.status==='ACTIVE'?'ok':'bad'}">${d.status}</div></div>
+            </div>`;
+                    await loadOrders();
+                } catch (e) {
+                    q('searchMsg').textContent = e.message;
+                    q('simInfo').textContent = '尚未选择卡';
+                    currentIccid = '';
+                    q('orders').innerHTML = '';
+                }
+            };
+
+            // 刷新状态
+            async function fetchStatus() {
+                if (!currentIccid) return;
+                const res = await fetch(`${baseUrl}/sims/${currentIccid}/status`, {
+                    headers: {...H.auth()
+                    }
+                });
+                const j = await H.j(res);
+                if (!res.ok) throw new Error(j.detail || j.msg);
+                const s = j.data.status;
+                const box = q('simInfo');
+                if (box && box.innerHTML) {
+                    const el = box.querySelector('.status');
+                    if (el) {
+                        el.textContent = s;
+                        el.className = `status ${s==='ACTIVE'?'ok':'bad'}`;
+                    }
+                }
+            }
+            q('btnRefresh').onclick = fetchStatus;
+
+            // 改状态
+            async function changeStatus(action) {
+                if (!currentIccid) return;
+                q('opMsg').style.display = 'none';
+                const res = await fetch(`${baseUrl}/sims/${currentIccid}/status`, {
+                    method: 'PATCH',
+                    headers: {...H.auth(),
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        action
+                    })
+                });
+                const j = await H.j(res);
+                if (!res.ok) {
+                    q('opMsg').textContent = j.detail || j.msg || '操作失败';
+                    q('opMsg').style.display = 'block';
+                    return;
+                }
+                q('opMsg').textContent = `已执行 ${action}`;
+                q('opMsg').style.display = 'block';
+                await fetchStatus();
+            }
+            q('btnSuspend').onclick = () => changeStatus('SUSPEND');
+            q('btnResume').onclick = () => changeStatus('RESUME');
+
+            // 用量
+            q('btnUsage').onclick = async() => {
+                if (!currentIccid) return;
+                const month = q('month').value.trim();
+                const res = await fetch(`${baseUrl}/sims/${currentIccid}/usage?month=${encodeURIComponent(month)}`, {
+                    headers: {...H.auth()
+                    }
+                });
+                const j = await H.j(res);
+                if (!res.ok) {
+                    q('usageBox').textContent = j.detail || j.msg || '无数据';
+                    return;
+                }
+                const d = j.data;
+                q('usageBox').textContent = `已用 ${d.used_mb} MB / 套餐 ${d.package_mb} MB，剩余 ${Math.max(0, (d.package_mb||0)-(d.used_mb||0))} MB`;
+            };
+
+            // 下单
+            q('btnBuy').onclick = async() => {
+                if (!currentIccid) return;
+                const month = q('month').value.trim();
+                const mb = parseInt(q('pkgMb').value || '0', 10) || 0;
+                if (mb <= 0) {
+                    alert('请输入有效的加包流量（MB）');
+                    return;
+                }
+                const tid = new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14) + '-' + Math.floor(Math.random() * 10000);
+                const res = await fetch(`${baseUrl}/sims/${currentIccid}/purchase`, {
+                    method: 'POST',
+                    headers: {...H.auth(),
+                        'Content-Type': 'application/json',
+                        'X-TransId': tid
+                    },
+                    body: JSON.stringify({
+                        month,
+                        package_mb: mb,
+                        product_id: 'pkg_' + mb + 'm',
+                        pay_amount_cent: mb
+                    })
+                });
+                const j = await H.j(res);
+                if (!res.ok) {
+                    alert(j.detail || j.msg || '购买失败');
+                    return;
+                }
+                await loadOrders();
+                alert(`下单成功：${j.data.order_id}`);
+            };
+
+            // 订单列表
+            async function loadOrders() {
+                if (!currentIccid) return;
+                const month = q('month').value.trim();
+                const res = await fetch(`${baseUrl}/sims/${currentIccid}/purchases?month=${encodeURIComponent(month)}&limit=20&offset=0`, {
+                    headers: {...H.auth()
+                    }
+                });
+                const j = await H.j(res);
+                if (!res.ok) {
+                    q('orders').innerHTML = '';
+                    return;
+                }
+                const rows = (j.data.items || []).map(o => `<tr><td>${o.order_id}</td><td>${o.month}</td><td>${o.package_mb||'-'}</td><td>${o.status}</td><td>${o.created_at||''}</td></tr>`).join('');
+                q('orders').innerHTML = rows || '<tr><td colspan="5" class="muted">暂无订单</td></tr>';
+            }
+        });
+    </script>
+</body>
+
+</html>

@@ -1,0 +1,13 @@
+[Unit]
+Description=iot-sim-ops FastAPI (user)
+
+[Service]
+# 这里按部署机器实际路径改
+WorkingDirectory=/ABSOLUTE/PATH/TO/iot-sim-ops/api/mock-fastapi
+EnvironmentFile=/ABSOLUTE/PATH/TO/iot-sim-ops/api/mock-fastapi/.env.systemd
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/ABSOLUTE/PATH/TO/iot-sim-ops/api/mock-fastapi/.venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8000 --log-level info
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
