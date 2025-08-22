@@ -1,193 +1,303 @@
 # iot-sim-ops
 
-最小可用的物联卡运营演示系统（MVP）。包含：
-- **数据库迁移**（MySQL 8）：认证、物联卡、月用量、购买订单、Token（不透明，1h 过期）
-- **Mock 后端**（FastAPI）：`/auth/token`、`/sims/{iccid}/usage`、`/sims/{iccid}/purchase`、`/sims/{iccid}/status`
-- **Postman 集合与环境**：一键联调
-- **CI（GitHub Actions）**：起 MySQL 8，执行迁移（V001/V002）并做抽查
+最小可用（MVP）的物联卡运营演示系统。包含 **MySQL** 数据层、**FastAPI** Mock 服务、**前端静态页**（登录/控制台）、**Postman** 集合，以及 **systemd 常驻 + 日志归档** 运维脚本。
+
+> 适合教学与联调：查询卡片 → 查询当月用量 → 订购（加包、幂等） → 修改卡状态（停/复机） → 业务日志落盘归档。
 
 ---
 
 ## 目录结构
 
 ```
-db/
-  ├─ migrations/
-  │   ├─ V001__init_schema.sql       # 初始化表 & 视图（非破坏）
-  │   └─ V002__seed_demo.sql         # 演示数据 & 1h token（非破坏）
-  └─ iot_sim_ops_reset.sql           # 本地“一键重置”脚本（会 DROP）
-api/
-  └─ mock-fastapi/
-      ├─ app.py
-      ├─ requirements.txt
-      ├─ .env.example                # 示例环境变量（可提交）
-      └─ run.sh                      # 本地一键启动
-postman/
-  ├─ postman_iot_sim_ops_collection.json
-  └─ postman_iot_sim_ops_env.json
-.github/
-  └─ workflows/ci.yml                # 迁移 & 抽查
+/iot-sim-ops
+├── api/mock-fastapi/            # 后端（FastAPI + Uvicorn）
+│   ├── app.py                   # 主应用
+│   ├── requirements.txt
+│   ├── run.sh                   # 本地前台启动脚本
+│   └── web/                     # 静态前端
+│       ├── login.html
+│       └── index.html
+├── db/
+│   ├── migrations/              # 迁移脚本（V001, V002, V005~V007 ...）
+│   ├── iot_sim_ops_reset.sql    # 一键重置（开发演示用，谨慎）
+│   └── *.sql
+├── postman/                     # Postman 集合与环境
+├── scripts/
+│   └── export_logs.sh           # journald → 文件日志导出 & 仅保留最近10份
+├── ops/systemd/                 # systemd 单元文件（部署模板）
+│   ├── iot-sim-ops-api.service
+│   ├── iot-sim-ops-logdump.service
+│   └── iot-sim-ops-logdump.timer
+└── README.md
 ```
 
 ---
 
-## 快速开始（本地/虚机）
+## 运行环境
 
-> 数据库名：`iot_sim_ops`；默认演示账号：`appid=demo-app`、`password=demo-password`
+* OS：Ubuntu 20.04+/22.04+
+* Python：3.10+（已在 3.12 验证）
+* MySQL：8.0+
+* 必要工具：`git`、`python3-venv`、`systemd`
 
-### 1) 数据库初始化
+---
 
-**方式 A：标准迁移（推荐，非破坏）**
+## 数据库初始化
+
+> **警告**：`iot_sim_ops_reset.sql` 会重建库，开发环境使用即可。
+
+**方式 A：一键重置**
+
+```bash
+mysql -uroot -p < db/iot_sim_ops_reset.sql
+```
+
+**方式 B：按迁移顺序执行**
+
+```bash
+mysql -uroot -p iot_sim_ops < db/migrations/V001__init_schema.sql
+mysql -uroot -p iot_sim_ops < db/migrations/V002__seed_demo.sql
+mysql -uroot -p iot_sim_ops < db/migrations/V005__user_and_ownership.sql
+mysql -uroot -p iot_sim_ops < db/migrations/V006__seed_demo_users_and_assign_sims.sql
+mysql -uroot -p iot_sim_ops < db/migrations/V007__add_sim_purchase_usage.sql
+```
+
+**验收**
+
 ```sql
--- 在 DBeaver / mysql client 中顺序执行：
-SOURCE db/migrations/V001__init_schema.sql;
-SOURCE db/migrations/V002__seed_demo.sql;
+-- 随机看 5 张卡是否有归属
+SELECT s.iccid, u.username
+FROM sim_card s LEFT JOIN users u ON s.owner_user_id=u.id
+LIMIT 5;
+
+-- 看当月用量/订单表是否在
+SHOW TABLES LIKE 'sim_usage';
+SHOW TABLES LIKE 'sim_purchase';
 ```
 
-**方式 B：一键重置（本地清库用，会 DROP）**
-```sql
-SOURCE db/iot_sim_ops_reset.sql;
-```
+---
 
-脚本末尾会输出一条 `issued_demo_token`（1 小时有效），可直接用于 API 鉴权。
-
-### 2) 启动 Mock 后端
-
-> 在 Ubuntu 虚机（例：`192.168.237.130`）上操作
+## 本地开发启动（前台）
 
 ```bash
-cd ~/iot-sim-ops/api/mock-fastapi
-cp .env.example .env          # 按实际 MySQL 填 DB_*（DB_NAME=iot_sim_ops）
-./run.sh                      # 首次会创建 venv 并安装依赖，随后启动 uvicorn:8000
-# 若端口占用，可用：
-# uvicorn app:app --host 0.0.0.0 --port 8010
-```
+cd api/mock-fastapi
+python3 -m venv .venv && source .venv/bin/activate
+pip install -U pip -r requirements.txt
 
-自测：
-```bash
-curl http://127.0.0.1:8000/alive
-# 期望: {"ok": true, "service": "iot-sim-ops", "version": "0.1.0"}
-```
-
-（可选）做成用户级 systemd 后台服务：
-```bash
-mkdir -p ~/.config/systemd/user
-cat > ~/.config/systemd/user/iot-sim-ops-api.service <<'EOF'
-[Unit]
-Description=iot-sim-ops FastAPI (user)
-[Service]
-WorkingDirectory=/home/<USER>/iot-sim-ops/api/mock-fastapi
-EnvironmentFile=/home/<USER>/iot-sim-ops/api/mock-fastapi/.env
-ExecStart=/home/<USER>/iot-sim-ops/api/mock-fastapi/.venv/bin/uvicorn app:app --host 0.0.0.0 --port 8000
-Restart=on-failure
-[Install]
-WantedBy=default.target
-EOF
-systemctl --user daemon-reload
-systemctl --user enable --now iot-sim-ops-api.service
-```
-
-### 3) Postman 联调
-
-1. Import：`postman/postman_iot_sim_ops_collection.json` 与 `postman/postman_iot_sim_ops_env.json`  
-2. 将环境变量 `baseUrl` 改为你的服务地址：`http://192.168.237.130:8000`（或 8010）  
-3. 按顺序调用：
-   - **Auth: Get Token**（自动写入 `{{token}}`）
-   - **Usage: Get Monthly Usage**
-   - **SIM: Get Status**
-   - **SIM: Change Status**
-   - **Purchase: Add-on Package**（预请求会生成 `{{transid}}`；重复 transid 幂等返回同一单）
-
----
-
-## 何时用迁移 / 何时用重置？
-
-| 场景 | 使用 |
-| --- | --- |
-| 日常开发、PR、CI | **V001 → V002 → …**（非破坏、可审计） |
-| 全新环境首次初始化 | **V001 → V002** |
-| 本地想“一把梭清库重来” | **`db/iot_sim_ops_reset.sql`**（破坏式，仅本地/测试） |
-
-> 未来有新变更：新增 `db/migrations/V003__xxx.sql`，走 PR & CI；本地只需执行新增的 `V003`。
-
----
-
-## CI
-
-- 路径：`.github/workflows/ci.yml`  
-- 流程：拉起 MySQL 8 → 执行 `V001__init_schema.sql`、`V002__seed_demo.sql` → 抽查视图/表  
-- 合并主分支前要求 CI 通过（建议在 GitHub 设置里对 `main` 开启分支保护）
-
----
-
-## API 说明（MVP）
-
-- `POST /auth/token`：使用 `appid/password` 获取不透明 `token`（有效期 3600s），落库到 `auth_token`  
-- `GET /sims/{iccid}/usage?month=YYYY-MM`：从 `v_usage_effective` 读取“基础套餐 + 成功加包 − 已用”  
-- `POST /sims/{iccid}/purchase`：请求体含 `month`、`package_mb`；Header 需 `X-TransId`（幂等键）  
-- `GET /sims/{iccid}/status`、`PATCH /sims/{iccid}/status`：ACTIVE ↔ SUSPENDED（DEACTIVATED 不可变更）
-
-**鉴权**：全部业务接口需 Header `Authorization: Bearer <token>`；服务端校验 `auth_token.expires_at > NOW()`。
-
----
-
-## 环境变量（`.env`）
-
-```ini
+# 可选：提供 .env（数据库连接）
+cat > .env <<'EOF'
 DB_HOST=127.0.0.1
 DB_PORT=3306
 DB_USER=root
-DB_PASS=your_mysql_password
+DB_PASS=你的密码
 DB_NAME=iot_sim_ops
-```
+EOF
 
-> 提醒：`.env` **不要提交**；仓库内提供 `.env.example` 作为模板。
-
----
-
-## 常见问题排查
-
-- **端口占用**：  
-  `sudo ss -ltnp | grep :8000` → 若被旧服务占用，停服务或改端口：`uvicorn ... --port 8010`
-- **Token 过期（401）**：  
-  1 小时有效，重新调用 `/auth/token` 或执行 `V002` 生成新 token
-- **购买 500**：  
-  使用仓库当前的 `app.py`（在 Python 中生成 `order_id`，并统一返回 JSON）；日志在前台 uvicorn 控制台
-- **视图不更新**：  
-  `v_usage_effective` 是汇总视图，只统计 `purchase_order.status='SUCCESS'` 的加包
-
----
-
-## 维护与运维
-
-**清理过期 token（可 cron）**
-```sql
-DELETE FROM iot_sim_ops.auth_token WHERE expires_at < NOW();
-```
-
-**查看今日订单**
-```sql
-SELECT * FROM iot_sim_ops.purchase_order
-WHERE DATE(created_at)=CURDATE()
-ORDER BY created_at DESC;
-```
-
-（可选）每天 3:00 清理：
-```cron
-0 3 * * * mysql -uroot -p'***' -e "DELETE FROM iot_sim_ops.auth_token WHERE expires_at < NOW();"
+# 启动
+./run.sh
+# 浏览器访问:
+# http://127.0.0.1:8000/web/login.html
 ```
 
 ---
 
-## 贡献与变更流程
+## 生产/演示部署（systemd 常驻）
 
-1. 新建分支（如 `feat/db-xxx`）  
-2. 新增迁移文件 `db/migrations/V00N__xxx.sql`（**不要修改历史 V001/V002**）  
-3. 提 PR；等待 CI 通过 → 审核合并  
-4. 本地执行新增的 `V00N` 即可同步状态
+> 以下命令默认代码路径 `/home/<user>/iot-sim-ops`，请替换为你的实际用户名与路径。
+
+1）**安装依赖 & 虚拟环境**
+
+```bash
+cd /home/<user>/iot-sim-ops/api/mock-fastapi
+python3 -m venv .venv && source .venv/bin/activate
+pip install -U pip -r requirements.txt
+[ -f .env.example ] && cp .env.example .env   # 可选
+```
+
+2）**安装 systemd 单元（从仓库模板复制）**
+
+```bash
+sudo cp /home/<user>/iot-sim-ops/ops/systemd/iot-sim-ops-api.service      /etc/systemd/system/
+sudo cp /home/<user>/iot-sim-ops/ops/systemd/iot-sim-ops-logdump.service  /etc/systemd/system/
+sudo cp /home/<user>/iot-sim-ops/ops/systemd/iot-sim-ops-logdump.timer    /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+> 如需修改端口/用户/路径，直接编辑 `/etc/systemd/system/*.service|*.timer` 对应字段：`User`、`WorkingDirectory`、`ExecStart`、`EnvironmentFile`。
+
+3）**启动与自启动**
+
+```bash
+# 主服务（Uvicorn）
+sudo systemctl enable --now iot-sim-ops-api
+sudo systemctl status iot-sim-ops-api
+journalctl -u iot-sim-ops-api -n 200 -f   # 实时日志（journald）
+
+# 日志导出定时器（见下一节）
+sudo systemctl enable --now iot-sim-ops-logdump.timer
+systemctl list-timers | grep iot-sim-ops-logdump
+```
 
 ---
 
-## 许可证
+## 日志与可观察性
 
-本仓库仅用于学习与演示，未附带商业授权条款。
+### 1）运行日志（journald）
+
+* 主服务日志默认写入 **journald**：
+  `journalctl -u iot-sim-ops-api -n 200 -f`
+* 应用内已集成**访问日志中间件**与**业务日志**（`biz_logger`），会输出：
+
+  * `http method=... path=... status=... dur_ms=... ip=... rid=... transid=...`
+  * `sims.status get/patch ...`、`sims.search ...`、`sims.usage ...`、`sims.purchase ok ...`
+
+### 2）日志导出到文件（每10分钟一份，仅保留最新10份）
+
+* 脚本：`scripts/export_logs.sh`
+* 轮询单元：`ops/systemd/iot-sim-ops-logdump.service`（oneshot）
+* 定时器：`ops/systemd/iot-sim-ops-logdump.timer`（每 10 分钟）
+
+导出位置（可修改脚本中的 `ROOT`）：
+`/home/<user>/iot-sim-ops/logs/app-YYYYmmdd_HHMM.log`
+
+**手动导出最近 30 分钟（可立即验收）：**
+
+```bash
+DURATION="30 min ago" /home/<user>/iot-sim-ops/scripts/export_logs.sh
+ls -l /home/<user>/iot-sim-ops/logs
+tail -n +1 /home/<user>/iot-sim-ops/logs/app-*.log | grep -E 'auth\.login|sims\.(search|usage|purchase|status)|http method='
+```
+
+---
+
+## 前端页面
+
+* 登录页：`/web/login.html`
+
+  * 登录成功后将 `token` 存入 `localStorage`。
+* 控制台：`/web/index.html`
+
+  * 搜索卡片（ICCID）并展示基础信息；
+  * 查询当月用量（`/usage?month=YYYY-MM`）；
+  * 订购（加包）：点击“一键加包”，会自动生成 `X-TransId` 幂等 ID 并调用 `/purchase`；
+  * 刷新状态（GET `/status`）/ 修改状态（PATCH `/status`）。
+
+> **请求头**：`Authorization: Bearer <token>`；
+> **订购幂等**：`X-TransId: <uuid>`。
+
+---
+
+## Postman 集合
+
+* 导入 `postman/iot-sim-ops (MVP).postman_collection.json` 与对应环境（`postman/iot-sim-ops (local).postman_environment.json`）。
+* 推荐调用顺序：`Login/Get Token → /sims/search → /sims/{iccid}/usage?month= → /sims/{iccid}/purchase → /sims/{iccid}/status (GET|PATCH)`。
+
+---
+
+## API 约定（MVP）
+
+* 所有接口除登录外，均需 Header：`Authorization: Bearer <token>`
+* 成功响应统一格式：
+
+  ```json
+  { "code": "0", "msg": "ok", "data": { ... }, "trace": {} }
+  ```
+
+### Auth
+
+* `POST /auth/login`
+  请求体：`{ "username": "...", "password": "..." }`
+  响应：`{ "code":"0","data":{"token":"...","user":{"user_id":1,"username":"..."}} }`
+
+### SIM 搜索
+
+* `GET /sims/search?iccid=...`
+  返回匹配的卡基础信息（含 owner、status 等）。
+
+### 当月用量
+
+* `GET /sims/{iccid}/usage?month=YYYY-MM`
+  返回 `{ "used_mb": 200, "package_mb": 1024, ... }`
+
+  > 若开启“购买后累加套餐上限”，加包会实时反映在 `package_mb`。
+
+### 订购（加包）
+
+* `POST /sims/{iccid}/purchase`
+  Header：`X-TransId: <uuid>`（幂等）
+  请求体示例：`{ "package_mb": 500 }`（字段以实际实现为准）
+  返回订单信息，并在幂等冲突时返回原订单。
+
+* `GET /sims/{iccid}/purchases?month=YYYY-MM&limit=20&offset=0`
+  返回该月订单列表。
+
+### 卡状态
+
+* `GET /sims/{iccid}/status` → `{ "status": "ACTIVE" | "SUSPENDED" }`
+* `PATCH /sims/{iccid}/status`
+  请求体：`{ "action": "SUSPEND" | "RESUME" }`
+
+---
+
+## 数据模型（核心表）
+
+* `users`、`user_account`、`auth_token`（登录与鉴权）
+* `sim_card`（ICCID、MSISDN、owner\_user\_id、status 等）
+* `sim_usage`（iccid、month、used\_mb、package\_mb）
+
+  > 可选逻辑：订购成功后，`package_mb += 本次加包`
+* `sim_purchase`（order\_id、iccid、month、package\_mb、status、transid、created\_at）
+
+  > 幂等：同一 `X-TransId` 重复请求返回同一订单
+* `sim_op_log`（操作流水：停/复机等）
+
+---
+
+## 常见问题（FAQ）
+
+**Q1: `Access denied for user 'root'@'localhost' (using password: NO)`**
+A: systemd 模式下未读取 `.env`。检查单元文件是否包含
+`EnvironmentFile=/home/<user>/iot-sim-ops/api/mock-fastapi/.env`，写入 DB\_\* 配置后 `daemon-reload && restart`。
+
+**Q2: 端口 8000 被占用**
+A: `sudo lsof -i:8000 -nP` 查 PID，`sudo kill -9 <PID>`；或修改 `ExecStart` 端口。
+
+**Q3: `Unit ... does not exist`**
+A: 没把单元文件复制到 `/etc/systemd/system/` 或未 `daemon-reload`。按“生产部署”步骤重新执行。
+
+**Q4: 手动导出日志时报权限**
+A: 在 `iot-sim-ops-logdump.service` 的 `[Service]` 段增加：
+`SupplementaryGroups=systemd-journal`，然后 `daemon-reload && restart timer`。
+
+**Q5: 订购后“套餐/剩余”没有变化**
+A: 确认是否启用了“购买后累加 `sim_usage.package_mb`”逻辑（`app.py` 内 `/purchase` 成功后累加），或前端下单后触发一次 `/usage` 刷新。
+
+---
+
+## 版本与里程碑
+
+* **v0.1.0（MVP）**
+
+  * SIM 搜索 / 当月用量 / 订购（幂等）/ 状态（GET|PATCH）
+  * systemd 常驻：`iot-sim-ops-api.service`
+  * 日志归档：`export_logs.sh` + `iot-sim-ops-logdump.timer`（10min 一份，仅保留 10 份）
+  * 访问日志中间件 + 关键业务日志（status/search/usage/purchase）
+
+---
+
+## 许可
+
+本项目使用仓库内 `LICENSE` 指定的开源许可（若未特别声明，默认 MIT）。
+
+---
+
+## 致谢
+
+* FastAPI / Uvicorn / PyMySQL
+* Postman
+
+---
+
+> 如果你在部署或联调中遇到问题，可参考“常见问题”一节或直接查看 journald：
+> `journalctl -u iot-sim-ops-api -n 200 -f`；
+> 文件导出在：`/home/<user>/iot-sim-ops/logs/`。
