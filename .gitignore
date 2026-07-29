@@ -14,6 +14,9 @@ scripts/*.log
 *.log
 .env
 api/mock-fastapi/.env
+api/mock-fastapi/.env.systemd
+api/mock-fastapi/.env.*
+!api/mock-fastapi/.env.example
 
 # OS/editor
 .DS_Store

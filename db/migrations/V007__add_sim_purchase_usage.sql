@@ -1,3 +1,5 @@
+USE iot_sim_ops;
+
 -- 订单：sim_purchase
 CREATE TABLE IF NOT EXISTS sim_purchase (
   id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
