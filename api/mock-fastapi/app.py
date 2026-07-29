@@ -1,6 +1,10 @@
 import os
+import logging
+import sys
+import time
+import uuid
 from pathlib import Path as SysPath
-from datetime import datetime, timedelta
+from datetime import datetime
 import random
 from typing import Optional
 
@@ -10,7 +14,7 @@ import bcrypt
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, HTTPException, Header, Query
+from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.encoders import jsonable_encoder
@@ -19,11 +23,32 @@ from fastapi.encoders import jsonable_encoder
 # 自动加载与本文件同目录的 .env
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
-app = FastAPI(title="iot-sim-ops", version="0.3.0")
+def parse_cors_origins(raw_value: str) -> list[str]:
+    origins = [item.strip() for item in raw_value.split(",") if item.strip()]
+    return origins or ["*"]
 
-# === logging setup（新增） ===
-import sys, time, uuid, logging
-from fastapi import Request  # 新增这个导入
+
+def parse_bool(raw_value: str, default: bool = False) -> bool:
+    normalized = raw_value.strip().lower()
+    if not normalized:
+        return default
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"invalid boolean value: {raw_value!r}")
+
+
+cors_origins = parse_cors_origins(os.getenv("CORS_ORIGINS", "*"))
+cors_allow_credentials = parse_bool(
+    os.getenv("CORS_ALLOW_CREDENTIALS", "false")
+)
+if "*" in cors_origins and cors_allow_credentials:
+    raise RuntimeError(
+        "CORS_ALLOW_CREDENTIALS=true requires explicit CORS_ORIGINS"
+    )
+
+app = FastAPI(title="iot-sim-ops", version="0.3.1")
 
 biz_logger = logging.getLogger("biz")
 if not biz_logger.handlers:
@@ -50,10 +75,12 @@ async def access_log_mw(request: Request, call_next):
     return resp
 # === end logging setup ===
 
-# CORS（同网段演示，简单放开；生产请改白名单）
+# CORS defaults to a credential-free demo configuration. Set explicit origins
+# in .env before allowing browser credentials.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
+    allow_credentials=cors_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -388,5 +415,4 @@ def purchase_list(
 
     payload = {"items": items or [], "limit": limit, "offset": offset}
     return {"code": "0", "msg": "ok", "data": jsonable_encoder(payload), "trace": {}}
-
 

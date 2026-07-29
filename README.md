@@ -2,7 +2,7 @@
 
 最小可用（MVP）的物联卡运营演示系统。包含 **MySQL** 数据层、**FastAPI** Mock 服务、**前端静态页**（登录/控制台）、**Postman** 集合，以及 **systemd 常驻 + 日志归档** 运维脚本。
 
-> 适合教学与联调：查询卡片 → 查询当月用量 → 订购（加包、幂等） → 修改卡状态（停/复机） → 业务日志落盘归档。
+> 适合教学与联调：查询卡片 → 查询当月用量 → 订购（加包、幂等） → 修改卡状态（停/复机） → 业务日志落盘归档。该仓库是演示系统，不代表生产环境安全性、性能或可用性承诺。
 
 ---
 
@@ -18,7 +18,7 @@
 │       ├── login.html
 │       └── index.html
 ├── db/
-│   ├── migrations/              # 迁移脚本（V001, V002, V005~V007 ...）
+│   ├── migrations/              # 迁移脚本（V001, V002, V005-V009）
 │   ├── iot_sim_ops_reset.sql    # 一键重置（开发演示用，谨慎）
 │   └── *.sql
 ├── postman/                     # Postman 集合与环境
@@ -60,6 +60,8 @@ mysql -uroot -p iot_sim_ops < db/migrations/V002__seed_demo.sql
 mysql -uroot -p iot_sim_ops < db/migrations/V005__user_and_ownership.sql
 mysql -uroot -p iot_sim_ops < db/migrations/V006__seed_demo_users_and_assign_sims.sql
 mysql -uroot -p iot_sim_ops < db/migrations/V007__add_sim_purchase_usage.sql
+mysql -uroot -p iot_sim_ops < db/migrations/V008__add_imsi_to_sim_card.sql
+mysql -uroot -p iot_sim_ops < db/migrations/V009__purchase_price_and_product.sql
 ```
 
 **验收**
@@ -67,7 +69,7 @@ mysql -uroot -p iot_sim_ops < db/migrations/V007__add_sim_purchase_usage.sql
 ```sql
 -- 随机看 5 张卡是否有归属
 SELECT s.iccid, u.username
-FROM sim_card s LEFT JOIN users u ON s.owner_user_id=u.id
+FROM sim_card s LEFT JOIN user_account u ON s.owner_user_id=u.user_id
 LIMIT 5;
 
 -- 看当月用量/订单表是否在
@@ -91,6 +93,8 @@ DB_PORT=3306
 DB_USER=root
 DB_PASS=你的密码
 DB_NAME=iot_sim_ops
+CORS_ORIGINS=*
+CORS_ALLOW_CREDENTIALS=false
 EOF
 
 # 启动
@@ -98,6 +102,25 @@ EOF
 # 浏览器访问:
 # http://127.0.0.1:8000/web/login.html
 ```
+
+### 凭据与 CORS 安全
+
+* `.env` 和 `.env.systemd` 已被 Git 忽略；只提交不含真实密码的 `.env.example`。
+* 如果任何真实口令曾进入 Git 提交，应立即在数据库或服务器端轮换。只删除当前文件不会清除历史提交，也不会使旧口令失效。
+* `CORS_ORIGINS=*` 只适用于不携带浏览器凭据的本地演示。若设置 `CORS_ALLOW_CREDENTIALS=true`，必须把 `CORS_ORIGINS` 改为逗号分隔的明确来源。
+
+### 最小自动化检查
+
+```bash
+cd /path/to/iot-sim-ops
+python -m pip install \
+  -r api/mock-fastapi/requirements.txt \
+  -r api/mock-fastapi/requirements-dev.txt
+python -m compileall -q api/mock-fastapi
+python -m pytest -q
+```
+
+这些检查覆盖应用导入、健康响应、关键路由、CORS 配置解析和无 Token 鉴权拒绝；数据库迁移由 GitHub Actions 的 MySQL 8 服务单独验证。
 
 ---
 
@@ -207,7 +230,7 @@ tail -n +1 /home/<user>/iot-sim-ops/logs/app-*.log | grep -E 'auth\.login|sims\.
 
 * `POST /auth/login`
   请求体：`{ "username": "...", "password": "..." }`
-  响应：`{ "code":"0","data":{"token":"...","user":{"user_id":1,"username":"..."}} }`
+  响应：`{ "code":"0","data":{"token":"...","token_type":"Bearer","expires_in":3600} }`
 
 ### SIM 搜索
 
@@ -225,7 +248,7 @@ tail -n +1 /home/<user>/iot-sim-ops/logs/app-*.log | grep -E 'auth\.login|sims\.
 
 * `POST /sims/{iccid}/purchase`
   Header：`X-TransId: <uuid>`（幂等）
-  请求体示例：`{ "package_mb": 500 }`（字段以实际实现为准）
+  请求体示例：`{ "month": "2025-08", "package_mb": 500 }`
   返回订单信息，并在幂等冲突时返回原订单。
 
 * `GET /sims/{iccid}/purchases?month=YYYY-MM&limit=20&offset=0`
@@ -241,7 +264,7 @@ tail -n +1 /home/<user>/iot-sim-ops/logs/app-*.log | grep -E 'auth\.login|sims\.
 
 ## 数据模型（核心表）
 
-* `users`、`user_account`、`auth_token`（登录与鉴权）
+* `user_account`、`auth_token`（登录与鉴权）
 * `sim_card`（ICCID、MSISDN、owner\_user\_id、status 等）
 * `sim_usage`（iccid、month、used\_mb、package\_mb）
 
