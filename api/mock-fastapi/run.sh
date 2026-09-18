@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-set -e
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
-# load .env if present
-export $(grep -v '^#' .env 2>/dev/null | xargs -d '\n' -r)
-uvicorn app:app --host 0.0.0.0 --port 8000
+set -euo pipefail
+cd "$(dirname "$0")"
+# app.py loads the optional .env; the caller installs dependencies once.
+exec python3 -m uvicorn app:app --host "${API_HOST:-0.0.0.0}" --port "${API_PORT:-8000}"

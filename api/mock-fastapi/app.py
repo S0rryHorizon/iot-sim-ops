@@ -6,12 +6,13 @@ import uuid
 from pathlib import Path as SysPath
 from datetime import datetime
 import random
+import re
 from typing import Optional
 
 import pymysql
 from pymysql.cursors import DictCursor
 import bcrypt
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, HTTPException, Header, Query, Request
@@ -136,9 +137,46 @@ class ChangeStatus(BaseModel):
 
 class PurchaseBody(BaseModel):
     month: str
-    package_mb: int
-    product_id: Optional[str] = None
-    pay_amount_cent: Optional[int] = None
+    package_mb: int = Field(gt=0, le=2_147_483_647)
+    product_id: Optional[str] = Field(default=None, max_length=64)
+    pay_amount_cent: Optional[int] = Field(default=None, ge=0, le=2_147_483_647)
+
+    @field_validator("package_mb", "pay_amount_cent", mode="before")
+    @classmethod
+    def reject_boolean_amount(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("amount must be an integer")
+        return value
+
+
+INT_MAX = 2_147_483_647
+MONTH_PATTERN = re.compile(r"[0-9]{4}-(0[1-9]|1[0-2])\Z")
+TRANSID_DUPLICATE_PATTERN = re.compile(
+    r"for key ['`](?:[A-Za-z0-9_]+\.)?uk_transid['`](?:\s|$)", re.IGNORECASE
+)
+
+
+def validated_month(value: str) -> str:
+    if not MONTH_PATTERN.fullmatch(value) or value[:4] == "0000":
+        raise HTTPException(status_code=400, detail="invalid month")
+    return value
+
+
+def transid_duplicate(error: pymysql.err.IntegrityError) -> bool:
+    return (
+        len(error.args) >= 2
+        and error.args[0] == 1062
+        and bool(TRANSID_DUPLICATE_PATTERN.search(str(error.args[1])))
+    )
+
+
+def purchase_identity(iccid: str, month: str, package_mb: int,
+                      product_id: Optional[str], price_cent: Optional[int]) -> tuple:
+    return (iccid, month, package_mb, product_id, price_cent)
+
+
+def purchase_response(order: dict, transid: str) -> dict:
+    return {"code": "0", "msg": "ok", "data": jsonable_encoder(order), "trace": {"transid": transid}}
 
 # -------- endpoints --------
 @app.get("/alive")
@@ -299,6 +337,7 @@ def change_status(iccid: str, body: ChangeStatus, authorization: Optional[str] =
 @app.get("/sims/{iccid}/usage")
 def usage(iccid: str, month: str, authorization: Optional[str] = Header(None)):
     user = require_auth_user(authorization)
+    month = validated_month(month)
     with get_conn() as conn, conn.cursor() as cur:
         # 先做归属校验
         cur.execute("SELECT owner_user_id FROM sim_card WHERE iccid=%s", (iccid,))
@@ -325,39 +364,82 @@ def usage(iccid: str, month: str, authorization: Optional[str] = Header(None)):
 @app.post("/sims/{iccid}/purchase")
 def purchase(iccid: str, body: PurchaseBody, authorization: Optional[str] = Header(None), x_transid: Optional[str] = Header(None)):
     user = require_auth_user(authorization)
-    month = body.month
-    pkg = int(body.package_mb or 0)
-    if pkg <= 0:
-        raise HTTPException(status_code=400, detail="invalid package_mb")
-
+    month = validated_month(body.month)
+    pkg = body.package_mb
+    if x_transid is not None and (not x_transid.strip() or len(x_transid) > 64):
+        raise HTTPException(status_code=400, detail="invalid X-TransId")
+    transid = x_transid if x_transid is not None else (
+        datetime.now().strftime("%Y%m%dT%H%M%S") + f"-{random.randint(1000,9999)}"
+    )
+    requested = purchase_identity(iccid, month, pkg, body.product_id, body.pay_amount_cent)
     with get_conn() as conn, conn.cursor() as cur:
-        # 归属校验
-        cur.execute("SELECT owner_user_id FROM sim_card WHERE iccid=%s", (iccid,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="not found")
-        if row["owner_user_id"] != user["user_id"]:
-            raise HTTPException(status_code=403, detail="forbidden")
+        try:
+            def check_ownership():
+                cur.execute("SELECT owner_user_id FROM sim_card WHERE iccid=%s", (iccid,))
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="not found")
+                if row["owner_user_id"] != user["user_id"]:
+                    raise HTTPException(status_code=403, detail="forbidden")
 
-        # 幂等：按 transid 查已存在订单
-        if x_transid:
-            cur.execute("SELECT * FROM sim_purchase WHERE transid=%s", (x_transid,))
-            exist = cur.fetchone()
-            if exist:
-                return {"code": "0", "msg": "ok", "data": exist, "trace": {"transid": x_transid}}
+            def replay_or_conflict(order):
+                actual = purchase_identity(
+                    order["iccid"], order["month"], order["package_mb"],
+                    order["product_id"], order["price_cent"],
+                )
+                if actual != requested:
+                    raise HTTPException(status_code=409, detail="X-TransId conflict")
+                return purchase_response(order, transid)
+
+            check_ownership()
+            if x_transid is not None:
+                cur.execute("SELECT * FROM sim_purchase WHERE transid=%s", (transid,))
+                existing = cur.fetchone()
+                if existing:
+                    return replay_or_conflict(existing)
+        except pymysql.MySQLError as error:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail="DB_ERROR") from error
 
         order_id = "PO" + datetime.now().strftime("%Y%m%d%H%M%S") + f"{random.randint(1000,9999)}"
-        transid = x_transid or (datetime.now().strftime("%Y%m%dT%H%M%S") + f"-{random.randint(1000,9999)}")
-
         try:
             cur.execute(
                 """
-                INSERT INTO sim_purchase (order_id, iccid, month, package_mb, status, transid, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                INSERT INTO sim_purchase
+                    (order_id, iccid, month, package_mb, product_id, price_cent, status, transid, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 """,
-                (order_id, iccid, month, pkg, "SUCCESS", transid),
+                (order_id, iccid, month, pkg, body.product_id, body.pay_amount_cent, "SUCCESS", transid),
             )
-            # 同步累计到 sim_usage（本月总套餐 = 原套餐 + 本次加包）
+        except pymysql.err.IntegrityError as error:
+            # Only this INSERT's uk_transid race may become an idempotent replay.
+            conn.rollback()  # End the repeatable-read snapshot before reading the winner.
+            if x_transid is None or not transid_duplicate(error):
+                raise HTTPException(status_code=500, detail="DB_ERROR") from error
+            try:
+                check_ownership()
+                cur.execute("SELECT * FROM sim_purchase WHERE transid=%s", (transid,))
+                winner = cur.fetchone()
+            except pymysql.MySQLError as read_error:
+                conn.rollback()
+                raise HTTPException(status_code=500, detail="DB_ERROR") from read_error
+            if not winner:
+                raise HTTPException(status_code=500, detail="DB_ERROR")
+            return replay_or_conflict(winner)
+        except pymysql.MySQLError as error:
+            conn.rollback()
+            raise HTTPException(status_code=500, detail="DB_ERROR") from error
+
+        try:
+            # Lock any current usage row and reject a sum that cannot fit MySQL INT.
+            cur.execute(
+                "SELECT package_mb FROM sim_usage WHERE iccid=%s AND month=%s FOR UPDATE",
+                (iccid, month),
+            )
+            current_usage = cur.fetchone()
+            if current_usage and current_usage["package_mb"] > INT_MAX - pkg:
+                conn.rollback()
+                raise HTTPException(status_code=409, detail="package_mb capacity exceeded")
             cur.execute(
                 """
                 INSERT INTO sim_usage (iccid, month, used_mb, package_mb)
@@ -366,18 +448,18 @@ def purchase(iccid: str, body: PurchaseBody, authorization: Optional[str] = Head
                     package_mb = package_mb + VALUES(package_mb),
                     updated_at = NOW()
                 """,
-            (iccid, month, pkg),
+                (iccid, month, pkg),
             )
             conn.commit()
-        except Exception as e:
+            cur.execute("SELECT * FROM sim_purchase WHERE transid=%s", (transid,))
+            data = cur.fetchone()
+            if not data:
+                raise HTTPException(status_code=500, detail="DB_ERROR")
+        except pymysql.MySQLError as error:
             conn.rollback()
-            print("DB ERROR on purchase:", repr(e))
-            raise HTTPException(status_code=500, detail="DB_ERROR")
+            raise HTTPException(status_code=500, detail="DB_ERROR") from error
 
-        cur.execute("SELECT * FROM sim_purchase WHERE transid=%s", (transid,))
-        data = cur.fetchone()
-
-    return {"code": "0", "msg": "ok", "data": jsonable_encoder(data), "trace": {"transid": transid}}
+    return purchase_response(data, transid)
 
 @app.get("/sims/{iccid}/purchases")
 def purchase_list(
@@ -388,6 +470,8 @@ def purchase_list(
     offset: int = Query(0, ge=0),
 ):
     user = require_auth_user(authorization)
+    if month is not None:
+        month = validated_month(month)
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute("SELECT owner_user_id FROM sim_card WHERE iccid=%s", (iccid,))
         row = cur.fetchone()
@@ -398,12 +482,12 @@ def purchase_list(
 
         where = ["iccid=%s"]
         args = [iccid]
-        if month:
+        if month is not None:
             where.append("month=%s")
             args.append(month)
 
         sql = f"""
-            SELECT order_id, iccid, month, package_mb, status, transid, created_at
+            SELECT order_id, iccid, month, package_mb, product_id, price_cent, status, transid, created_at
             FROM sim_purchase
             WHERE {' AND '.join(where)}
             ORDER BY created_at DESC
@@ -415,4 +499,3 @@ def purchase_list(
 
     payload = {"items": items or [], "limit": limit, "offset": offset}
     return {"code": "0", "msg": "ok", "data": jsonable_encoder(payload), "trace": {}}
-

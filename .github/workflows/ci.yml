@@ -26,7 +26,7 @@ jobs:
       - name: Compile and test
         run: |
           python -m compileall -q api/mock-fastapi
-          python -m pytest -q
+          python -m pytest -q tests/test_app.py
 
   db-migrate:
     runs-on: ubuntu-latest
@@ -53,21 +53,42 @@ jobs:
             sleep 2
           done
           exit 1
-      - name: Apply migrations
+      - name: Initialize empty demo database from historical migrations
         run: |
-          for migration in \
-            db/migrations/V001__init_schema.sql \
-            db/migrations/V002__seed_demo.sql \
-            db/migrations/V005__user_and_ownership.sql \
-            db/migrations/V006__seed_demo_users_and_assign_sims.sql \
-            db/migrations/V007__add_sim_purchase_usage.sql \
-            db/migrations/V008__add_imsi_to_sim_card.sql \
-            db/migrations/V009__purchase_price_and_product.sql; do
-            mysql -h 127.0.0.1 -uroot -proot iot_sim_ops < "$migration"
-          done
+          mysql -h 127.0.0.1 -uroot -proot < db/schema.sql
+          mysql -h 127.0.0.1 -uroot -proot < db/seed.sql
       - name: Sanity checks
         run: |
           mysql -h 127.0.0.1 -uroot -proot -e "SELECT COUNT(*) 'sim_cards' FROM iot_sim_ops.sim_card;"
           mysql -h 127.0.0.1 -uroot -proot -e "SELECT COUNT(*) 'users' FROM iot_sim_ops.user_account;"
           mysql -h 127.0.0.1 -uroot -proot -e "SHOW COLUMNS FROM iot_sim_ops.sim_card LIKE 'imsi';"
           mysql -h 127.0.0.1 -uroot -proot -e "SHOW COLUMNS FROM iot_sim_ops.sim_purchase LIKE 'product_id';"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            api/mock-fastapi/requirements.txt
+            api/mock-fastapi/requirements-dev.txt
+      - name: Install API test dependencies
+        run: python -m pip install -r api/mock-fastapi/requirements.txt -r api/mock-fastapi/requirements-dev.txt
+      - name: Install headless Chromium
+        run: python -m playwright install --with-deps chromium
+      - name: Real MySQL HTTP and race regression
+        env:
+          IOT_TEST_DB_ISOLATED: '1'
+          IOT_TEST_DB_NAME: iot_sim_ops
+          IOT_TEST_DB_HOST: 127.0.0.1
+          IOT_TEST_DB_PORT: '3306'
+          IOT_TEST_DB_USER: root
+          IOT_TEST_DB_PASS: root
+        run: python -m pytest -q tests/test_db_integration.py
+      - name: Real browser purchase and stale-response regression
+        env:
+          IOT_TEST_DB_ISOLATED: '1'
+          IOT_TEST_DB_NAME: iot_sim_ops
+          IOT_TEST_DB_HOST: 127.0.0.1
+          IOT_TEST_DB_PORT: '3306'
+          IOT_TEST_DB_USER: root
+          IOT_TEST_DB_PASS: root
+        run: python -m pytest -q tests/test_browser_integration.py

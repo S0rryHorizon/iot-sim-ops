@@ -19,8 +19,9 @@
 │       └── index.html
 ├── db/
 │   ├── migrations/              # 迁移脚本（V001, V002, V005-V009）
-│   ├── iot_sim_ops_reset.sql    # 一键重置（开发演示用，谨慎）
-│   └── *.sql
+│   ├── schema.sql               # 空库初始化入口，顺序引用七个历史迁移
+│   ├── seed.sql                 # 可重复的非覆盖 synthetic 用量种子
+│   └── iot_sim_ops_reset.sql    # 显式销毁并重建开发演示库
 ├── postman/                     # Postman 集合与环境
 ├── scripts/
 │   └── export_logs.sh           # journald → 文件日志导出 & 仅保留最近10份
@@ -44,25 +45,24 @@
 
 ## 数据库初始化
 
-> **警告**：`iot_sim_ops_reset.sql` 会重建库，开发环境使用即可。
+先选择一台专用的 MySQL 演示服务，并从仓库根目录在空的 `iot_sim_ops` 库上执行。`schema.sql` 只是 MySQL 客户端 `SOURCE` 入口；表定义仅在 V001、V002、V005–V009 七个历史迁移中，未另建一套 DDL。V002/V006 含历史种子和覆盖式更新，因此完整初始化仅用于空演示库，不能当作无损升级流程。
 
-**方式 A：一键重置**
-
-```bash
-mysql -uroot -p < db/iot_sim_ops_reset.sql
-```
-
-**方式 B：按迁移顺序执行**
+**正常初始化（一次）**
 
 ```bash
-mysql -uroot -p iot_sim_ops < db/migrations/V001__init_schema.sql
-mysql -uroot -p iot_sim_ops < db/migrations/V002__seed_demo.sql
-mysql -uroot -p iot_sim_ops < db/migrations/V005__user_and_ownership.sql
-mysql -uroot -p iot_sim_ops < db/migrations/V006__seed_demo_users_and_assign_sims.sql
-mysql -uroot -p iot_sim_ops < db/migrations/V007__add_sim_purchase_usage.sql
-mysql -uroot -p iot_sim_ops < db/migrations/V008__add_imsi_to_sim_card.sql
-mysql -uroot -p iot_sim_ops < db/migrations/V009__purchase_price_and_product.sql
+mysql -h 127.0.0.1 -P 3306 -uroot -p < db/schema.sql
+mysql -h 127.0.0.1 -P 3306 -uroot -p < db/seed.sql
 ```
+
+以后需要补齐演示用量时，只重复运行 `db/seed.sql`；它使用 `INSERT IGNORE`，不会覆盖已有用量或订购后的套餐累计。旧 `bulk_seed_10k.sql` 依赖另一套 `offering/sim_id` 表结构，已移除。
+
+**明确销毁并重建（仅可丢弃的开发演示库）**
+
+```bash
+mysql -h 127.0.0.1 -P 3306 -uroot -p < db/iot_sim_ops_reset.sql
+```
+
+`iot_sim_ops_reset.sql` 会在所选 MySQL 服务上 `DROP DATABASE iot_sim_ops`，然后复用上述初始化入口；不要对有需保留数据的库运行。历史迁移不修改，也不在这里声称存在通用 migration 账本或无损升级能力。
 
 **验收**
 
@@ -117,10 +117,10 @@ python -m pip install \
   -r api/mock-fastapi/requirements.txt \
   -r api/mock-fastapi/requirements-dev.txt
 python -m compileall -q api/mock-fastapi
-python -m pytest -q
+python -m pytest -q tests/test_app.py
 ```
 
-这些检查覆盖应用导入、健康响应、关键路由、CORS 配置解析和无 Token 鉴权拒绝；数据库迁移由 GitHub Actions 的 MySQL 8 服务单独验证。
+不连接数据库的快速检查：`python -m pytest -q tests/test_app.py`。完整回归必须在专用、可清理的 MySQL 8 演示库中运行，先执行 `db/schema.sql` 和 `db/seed.sql`，再显式设置 `IOT_TEST_DB_ISOLATED=1`、`IOT_TEST_DB_NAME=iot_sim_ops` 及可选的 `IOT_TEST_DB_HOST/PORT/USER/PASS`，运行 `python -m pytest -q tests/test_db_integration.py tests/test_browser_integration.py`。浏览器测试还需 `python -m playwright install chromium`（Linux CI 使用 `--with-deps`），由 pytest 启动本地 Uvicorn 并连接同一隔离库。DB 测试夹具会清理自己创建的 synthetic 卡、订单和 token；浏览器登录另生成的 token 不由该夹具自动删除，需随专用测试库清理或等待过期。CI 的 `db-migrate` job 必跑两套测试，包含 TestClient HTTP 流、实际唯一键竞态、事务回滚、二次 seed 不覆盖用量，以及浏览器中的提交后响应丢失与乱序响应。切勿把这些变量指向需保留数据的库。
 
 ---
 
@@ -197,12 +197,13 @@ tail -n +1 /home/<user>/iot-sim-ops/logs/app-*.log | grep -E 'auth\.login|sims\.
 
 * 登录页：`/web/login.html`
 
-  * 登录成功后将 `token` 存入 `localStorage`。
+  * 登录成功后将 `token` 与 `loginUser` 存入 `localStorage`。
 * 控制台：`/web/index.html`
 
   * 搜索卡片（ICCID）并展示基础信息；
   * 查询当月用量（`/usage?month=YYYY-MM`）；
-  * 订购（加包）：点击“一键加包”，会自动生成 `X-TransId` 幂等 ID 并调用 `/purchase`；
+  * 订购（加包）：点击“购买”时先在当前标签的 `sessionStorage` 保存一份按 `loginUser` 隔离的卡、月份、MB、产品、金额和 `X-TransId` 快照（不存 token），再调用 `/purchase`；双击不会并发提交。响应丢失、超时或服务端错误后，刷新页面会显示待确认记录，不会自动重发。点击“重试待确认购买”仍使用原卡、月份、参数和幂等键，即使表单已改变。先核查结果再重试；要发起另一笔购买，必须先得到原请求的明确成功或拒绝。
+  * 成功回执立即显示订单号，再独立刷新订单和用量；后续 GET 失败不抹掉回执。切换卡/月及发起更新请求后，旧响应不能覆盖当前结果。明确的参数拒绝和容量不足会释放待确认记录；`X-TransId conflict`、401 与不确定错误保留记录供核查，其中 401 应重新登录同一账号。
   * 刷新状态（GET `/status`）/ 修改状态（PATCH `/status`）。
 
 > **请求头**：`Authorization: Bearer <token>`；
@@ -247,12 +248,12 @@ tail -n +1 /home/<user>/iot-sim-ops/logs/app-*.log | grep -E 'auth\.login|sims\.
 ### 订购（加包）
 
 * `POST /sims/{iccid}/purchase`
-  Header：`X-TransId: <uuid>`（幂等）
-  请求体示例：`{ "month": "2025-08", "package_mb": 500 }`
-  返回订单信息，并在幂等冲突时返回原订单。
+  Header：`X-TransId: <非空白且不超过 64 字符的 ID>`（省略时由服务生成）
+  请求体示例：`{ "month": "2025-08", "package_mb": 500, "product_id": "pkg_500", "pay_amount_cent": 700 }`
+  同一 ID 只在 `iccid/month/package_mb/product_id/pay_amount_cent` 全相等时返回原订单；不同请求返回通用 409，不附带旧订单。`product_id`/`pay_amount_cent` 可省略或设为 `null`，分别写入订单的 `product_id`/`price_cent`。`package_mb` 为 1–2147483647 的整数，金额为 `null` 或 0–2147483647；累计套餐超出 INT 上限时整单回滚。
 
 * `GET /sims/{iccid}/purchases?month=YYYY-MM&limit=20&offset=0`
-  返回该月订单列表。
+  返回该月订单列表，含 `product_id` 和 `price_cent`。购买、用量查询和列表过滤都要求真实有效的 `YYYY-MM` 月份。
 
 ### 卡状态
 
@@ -269,9 +270,9 @@ tail -n +1 /home/<user>/iot-sim-ops/logs/app-*.log | grep -E 'auth\.login|sims\.
 * `sim_usage`（iccid、month、used\_mb、package\_mb）
 
   > 可选逻辑：订购成功后，`package_mb += 本次加包`
-* `sim_purchase`（order\_id、iccid、month、package\_mb、status、transid、created\_at）
+* `sim_purchase`（order\_id、iccid、month、package\_mb、product\_id、price\_cent、status、transid、created\_at）
 
-  > 幂等：同一 `X-TransId` 重复请求返回同一订单
+  > 全局 `uk_transid` 保持不变；重放须先通过当前用户的卡归属校验并且请求五元组相等。
 * `sim_op_log`（操作流水：停/复机等）
 
 ---
