@@ -46,8 +46,10 @@ jobs:
           --health-interval=10s --health-timeout=5s --health-retries=30
     steps:
       - uses: actions/checkout@v4
-      - name: Install MySQL client
-        run: sudo apt-get update && sudo apt-get install -y mysql-client
+      - name: Ensure MySQL client
+        # Runner images ship the client; installing mysql-client there upgrades the
+        # preinstalled mysql-server, whose postinst fails.
+        run: command -v mysql || (sudo apt-get update && sudo apt-get install -y --no-install-recommends mysql-client-core)
       - name: Wait for MySQL
         run: |
           for i in {1..60}; do
