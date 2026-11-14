@@ -1,0 +1,19 @@
+# 系统级服务模板。按部署机器替换 User 和 /opt/iot-sim-ops 后复制到 /etc/systemd/system/。
+[Unit]
+Description=iot-sim-ops API (uvicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=iot
+WorkingDirectory=/opt/iot-sim-ops
+# 可选：数据库与 CORS 配置；文件不存在时使用默认值
+EnvironmentFile=-/opt/iot-sim-ops/api/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/iot-sim-ops/.venv/bin/python -m uvicorn api.app:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

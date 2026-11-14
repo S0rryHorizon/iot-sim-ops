@@ -1,11 +1,9 @@
 """Synthetic HTTP + real MySQL checks. IOT_TEST_DB_NAME must be disposable."""
 
 import os
-import sys
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,10 +12,10 @@ import pytest
 from fastapi.testclient import TestClient
 from pymysql.cursors import DictCursor
 
+from api import app as app_module
+from api import db, purchases
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "api" / "mock-fastapi"))
-import app as app_module  # noqa: E402
 
 
 @pytest.fixture
@@ -39,7 +37,7 @@ def db_case(monkeypatch):
         return pymysql.connect(**config, cursorclass=cursorclass)
 
     # Force every application request to the exact opt-in synthetic database.
-    monkeypatch.setattr(app_module, "get_conn", connect)
+    monkeypatch.setattr(db, "get_conn", connect)
     with connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT DATABASE() AS db")
         assert cur.fetchone()["db"] == name
@@ -63,7 +61,8 @@ def db_case(monkeypatch):
             )
             if seed_usage:
                 cur.execute(
-                    "INSERT INTO sim_usage(iccid, month, used_mb, package_mb) VALUES(%s, '2031-07', 200, 1024)",
+                    "INSERT INTO sim_usage(iccid, month, used_mb, package_mb) "
+                    "VALUES(%s, '2031-07', 200, 1024)",
                     (iccid,),
                 )
             conn.commit()
@@ -76,6 +75,7 @@ def db_case(monkeypatch):
             return next(iter(cur.fetchone().values()))
 
     with TestClient(app_module.app) as client:
+
         def login(username, password):
             response = client.post("/auth/login", json={"username": username, "password": password})
             assert response.status_code == 200, response.text
@@ -84,8 +84,12 @@ def db_case(monkeypatch):
             return token
 
         case = SimpleNamespace(
-            client=client, connect=connect, make_card=make_card, scalar=scalar,
-            alice=login("alice", "user1pass"), bob=login("bob", "user2pass"),
+            client=client,
+            connect=connect,
+            make_card=make_card,
+            scalar=scalar,
+            alice=login("alice", "user1pass"),
+            bob=login("bob", "user2pass"),
         )
         try:
             yield case
@@ -107,7 +111,8 @@ def headers(token, transid=None):
 
 def purchase(case, iccid, body, key=None, token=None):
     return case.client.post(
-        f"/sims/{iccid}/purchase", json=body,
+        f"/sims/{iccid}/purchase",
+        json=body,
         headers=headers(token or case.alice, key),
     )
 
@@ -121,7 +126,9 @@ def test_http_flow_replay_conflict_and_ownership(db_case):
     body = {"month": "2031-07", "package_mb": 77, "product_id": "pkg_77", "pay_amount_cent": 123}
     search = case.client.get("/sims/search", params={"iccid": iccid}, headers=headers(case.alice))
     assert search.status_code == 200 and search.json()["data"]["iccid"] == iccid
-    usage = case.client.get(f"/sims/{iccid}/usage", params={"month": "2031-07"}, headers=headers(case.alice))
+    usage = case.client.get(
+        f"/sims/{iccid}/usage", params={"month": "2031-07"}, headers=headers(case.alice)
+    )
     assert usage.status_code == 200 and usage.json()["data"]["package_mb"] == 1024
 
     first = purchase(case, iccid, body, key)
@@ -130,9 +137,14 @@ def test_http_flow_replay_conflict_and_ownership(db_case):
     assert (order["product_id"], order["price_cent"]) == ("pkg_77", 123)
     same = purchase(case, iccid, body, key)
     assert same.status_code == 200 and same.json()["data"]["order_id"] == order["order_id"]
-    listing = case.client.get(f"/sims/{iccid}/purchases", params={"month": "2031-07"}, headers=headers(case.alice))
+    listing = case.client.get(
+        f"/sims/{iccid}/purchases", params={"month": "2031-07"}, headers=headers(case.alice)
+    )
     assert listing.status_code == 200
-    assert (listing.json()["data"]["items"][0]["product_id"], listing.json()["data"]["items"][0]["price_cent"]) == ("pkg_77", 123)
+    assert (
+        listing.json()["data"]["items"][0]["product_id"],
+        listing.json()["data"]["items"][0]["price_cent"],
+    ) == ("pkg_77", 123)
 
     variations = [
         (iccid, {**body, "month": "2031-08"}),
@@ -149,12 +161,20 @@ def test_http_flow_replay_conflict_and_ownership(db_case):
     cross_owner_key = purchase(case, bob_card, body, key, case.bob)
     assert cross_owner_key.status_code == 409 and "data" not in cross_owner_key.json()
     assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE transid=%s", (key,)) == 1
-    assert case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,)) == 1101
+    assert (
+        case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,))
+        == 1101
+    )
 
     null_key = "synthetic-" + uuid.uuid4().hex
     null_body = {"month": "2031-07", "package_mb": 1}
     assert purchase(case, iccid, null_body, null_key).status_code == 200
-    assert purchase(case, iccid, {**null_body, "product_id": None, "pay_amount_cent": None}, null_key).status_code == 200
+    assert (
+        purchase(
+            case, iccid, {**null_body, "product_id": None, "pay_amount_cent": None}, null_key
+        ).status_code
+        == 200
+    )
     assert purchase(case, iccid, {**null_body, "pay_amount_cent": 0}, null_key).status_code == 409
 
 
@@ -180,19 +200,26 @@ def test_insert_race_uses_real_unique_key(db_case, monkeypatch, different):
                         observed.append(error)
                 raise
 
-    monkeypatch.setattr(app_module, "get_conn", lambda: case.connect(cursorclass=RacingCursor))
+    monkeypatch.setattr(db, "get_conn", lambda: case.connect(cursorclass=RacingCursor))
     body = {"month": "2031-07", "package_mb": 100, "product_id": None, "pay_amount_cent": None}
     other_body = {**body, "pay_amount_cent": 1} if different else body
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(purchase, case, iccid, body, key)
         second = pool.submit(purchase, case, iccid, other_body, key)
         responses = [first.result(timeout=20), second.result(timeout=20)]
-    assert sorted(response.status_code for response in responses) == ([200, 409] if different else [200, 200])
-    assert len(observed) == 1 and app_module.transid_duplicate(observed[0])
+    assert sorted(response.status_code for response in responses) == (
+        [200, 409] if different else [200, 200]
+    )
+    assert len(observed) == 1 and purchases.transid_duplicate(observed[0])
     assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE transid=%s", (key,)) == 1
-    assert case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,)) == 100
+    assert (
+        case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,))
+        == 100
+    )
     if different:
-        assert next(response.json() for response in responses if response.status_code == 409) == {"detail": "X-TransId conflict"}
+        assert next(response.json() for response in responses if response.status_code == 409) == {
+            "detail": "X-TransId conflict"
+        }
     else:
         assert responses[0].json()["data"]["order_id"] == responses[1].json()["data"]["order_id"]
 
@@ -207,9 +234,10 @@ def test_requests_without_keys_create_distinct_orders(db_case):
     assert len({response.json()["data"]["order_id"] for response in responses}) == 20
     assert len({response.json()["trace"]["transid"] for response in responses}) == 20
     assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE iccid=%s", (iccid,)) == 20
-    assert case.scalar(
-        "SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,)
-    ) == 1044
+    assert (
+        case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,))
+        == 1044
+    )
 
 
 def test_non_transid_integrity_error_is_not_a_replay(db_case, monkeypatch):
@@ -218,12 +246,13 @@ def test_non_transid_integrity_error_is_not_a_replay(db_case, monkeypatch):
     fixed_order_id = "PO203001010000001234"
     with case.connect() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO sim_purchase(order_id, iccid, month, package_mb, status, transid) VALUES(%s,%s,'2031-07',1,'SUCCESS',%s)",
+            "INSERT INTO sim_purchase(order_id, iccid, month, package_mb, status, transid) "
+            "VALUES(%s,%s,'2031-07',1,'SUCCESS',%s)",
             (fixed_order_id, iccid, "existing-" + uuid.uuid4().hex),
         )
         conn.commit()
 
-    monkeypatch.setattr(app_module, "new_order_id", lambda: fixed_order_id)
+    monkeypatch.setattr(purchases, "new_order_id", lambda: fixed_order_id)
     key = "other-" + uuid.uuid4().hex
     response = purchase(case, iccid, {"month": "2031-07", "package_mb": 4}, key)
     assert response.status_code == 500 and response.json() == {"detail": "DB_ERROR"}
@@ -255,13 +284,22 @@ def test_usage_write_error_and_overflow_rollback_order(db_case):
             conn.commit()
 
     with case.connect() as conn, conn.cursor() as cur:
-        cur.execute("INSERT INTO sim_usage(iccid, month, used_mb, package_mb) VALUES(%s,'2031-07',0,2147483646)", (iccid,))
+        cur.execute(
+            "INSERT INTO sim_usage(iccid, month, used_mb, package_mb) "
+            "VALUES(%s,'2031-07',0,2147483646)",
+            (iccid,),
+        )
         conn.commit()
     overflow_key = "overflow-" + uuid.uuid4().hex
     overflow = purchase(case, iccid, {"month": "2031-07", "package_mb": 2}, overflow_key)
-    assert overflow.status_code == 409 and overflow.json() == {"detail": "package_mb capacity exceeded"}
+    assert overflow.status_code == 409 and overflow.json() == {
+        "detail": "package_mb capacity exceeded"
+    }
     assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE transid=%s", (overflow_key,)) == 0
-    assert case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,)) == 2147483646
+    assert (
+        case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,))
+        == 2147483646
+    )
 
 
 def test_input_bounds_and_shared_month_validation(db_case):
@@ -269,16 +307,38 @@ def test_input_bounds_and_shared_month_validation(db_case):
     iccid = case.make_card()
     for month in ["2031-00", "2031-13", "2031-1", "0000-01", "2031-01extra", "２０３１-０１"]:
         assert purchase(case, iccid, {"month": month, "package_mb": 1}).status_code == 400
-        assert case.client.get(f"/sims/{iccid}/usage", params={"month": month}, headers=headers(case.alice)).status_code == 400
-        assert case.client.get(f"/sims/{iccid}/purchases", params={"month": month}, headers=headers(case.alice)).status_code == 400
+        assert (
+            case.client.get(
+                f"/sims/{iccid}/usage", params={"month": month}, headers=headers(case.alice)
+            ).status_code
+            == 400
+        )
+        assert (
+            case.client.get(
+                f"/sims/{iccid}/purchases", params={"month": month}, headers=headers(case.alice)
+            ).status_code
+            == 400
+        )
     for value in [0, -1, 2_147_483_648, True, 1.5]:
         assert purchase(case, iccid, {"month": "2031-07", "package_mb": value}).status_code == 422
     for value in [-1, 2_147_483_648, True]:
-        assert purchase(case, iccid, {"month": "2031-07", "package_mb": 1, "pay_amount_cent": value}).status_code == 422
-    assert purchase(case, iccid, {"month": "2031-07", "package_mb": 1, "product_id": "x" * 65}).status_code == 422
+        assert (
+            purchase(
+                case, iccid, {"month": "2031-07", "package_mb": 1, "pay_amount_cent": value}
+            ).status_code
+            == 422
+        )
+    assert (
+        purchase(
+            case, iccid, {"month": "2031-07", "package_mb": 1, "product_id": "x" * 65}
+        ).status_code
+        == 422
+    )
     for key in ["", " ", "x" * 65]:
         assert purchase(case, iccid, {"month": "2031-07", "package_mb": 1}, key).status_code == 400
-    converted = purchase(case, iccid, {"month": "2031-07", "package_mb": "2", "pay_amount_cent": "0"})
+    converted = purchase(
+        case, iccid, {"month": "2031-07", "package_mb": "2", "pay_amount_cent": "0"}
+    )
     assert converted.status_code == 200 and converted.json()["data"]["package_mb"] == 2
     assert converted.json()["data"]["price_cent"] == 0
     assert converted.json()["trace"]["transid"]
@@ -287,12 +347,16 @@ def test_input_bounds_and_shared_month_validation(db_case):
 def test_repeating_safe_seed_keeps_new_usage(db_case):
     case = db_case
     iccid = "8986001200000000001"
-    before = case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2025-08'", (iccid,))
+    before = case.scalar(
+        "SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2025-08'", (iccid,)
+    )
     key = "seed-check-" + uuid.uuid4().hex
     try:
         added = purchase(case, iccid, {"month": "2025-08", "package_mb": 7}, key)
         assert added.status_code == 200, added.text
-        updated = case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2025-08'", (iccid,))
+        updated = case.scalar(
+            "SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2025-08'", (iccid,)
+        )
         assert updated == before + 7
         source = (ROOT / "db" / "seed.sql").read_text(encoding="utf-8")
         source = source.replace("USE iot_sim_ops;", f"USE `{os.environ['IOT_TEST_DB_NAME']}`;")
@@ -301,9 +365,17 @@ def test_repeating_safe_seed_keeps_new_usage(db_case):
                 if statement.strip():
                     cur.execute(statement)
             conn.commit()
-        assert case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2025-08'", (iccid,)) == updated
+        assert (
+            case.scalar(
+                "SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2025-08'", (iccid,)
+            )
+            == updated
+        )
     finally:
         with case.connect() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM sim_purchase WHERE transid=%s", (key,))
-            cur.execute("UPDATE sim_usage SET package_mb=%s WHERE iccid=%s AND month='2025-08'", (before, iccid))
+            cur.execute(
+                "UPDATE sim_usage SET package_mb=%s WHERE iccid=%s AND month='2025-08'",
+                (before, iccid),
+            )
             conn.commit()

@@ -1,0 +1,13 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Browser assertions are outside this refactor's permitted edit scope.
+"tests/test_browser_integration.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

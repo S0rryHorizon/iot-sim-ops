@@ -11,9 +11,7 @@ from urllib.request import urlopen
 
 import pytest
 from playwright.async_api import async_playwright, expect
-
-from test_db_integration import db_case  # reuse its isolated DB setup and cleanup
-
+from test_db_integration import db_case as db_case  # reuse its isolated DB setup and cleanup
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,8 +33,8 @@ def web_server():
         "DB_NAME": name,
     })
     process = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app:app", "--host", "127.0.0.1", "--port", str(port)],
-        cwd=ROOT / "api" / "mock-fastapi", env=env,
+        [sys.executable, "-m", "uvicorn", "api.app:app", "--host", "127.0.0.1", "--port", str(port)],
+        cwd=ROOT, env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     origin = f"http://127.0.0.1:{port}"

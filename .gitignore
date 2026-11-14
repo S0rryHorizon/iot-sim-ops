@@ -4,20 +4,21 @@ __pycache__/
 *.sqlite3
 
 # venv
-api/mock-fastapi/.venv/
 .venv/
 
 # logs & local env
 logs/
-api/mock-fastapi/logs/
+api/logs/
 scripts/*.log
 *.log
 .env
-api/mock-fastapi/.env
-api/mock-fastapi/.env.systemd
-api/mock-fastapi/.env.*
-!api/mock-fastapi/.env.example
+api/.env
+api/.env.systemd
+api/.env.*
+!api/.env.example
 
 # OS/editor
 .DS_Store
 *.swp
+.ruff_cache/
+.pytest_cache/
