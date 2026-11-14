@@ -1,11 +1,9 @@
 """Synthetic HTTP + real MySQL checks. IOT_TEST_DB_NAME must be disposable."""
 
 import os
-import sys
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,10 +12,10 @@ import pytest
 from fastapi.testclient import TestClient
 from pymysql.cursors import DictCursor
 
+from api import app as app_module
+from api import db, purchases
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "api" / "mock-fastapi"))
-import app as app_module  # noqa: E402
 
 
 @pytest.fixture
@@ -33,69 +31,98 @@ def db_case(monkeypatch):
         "database": name,
         "charset": "utf8mb4",
         "autocommit": False,
+        "connect_timeout": 5,
+        "read_timeout": 10,
+        "write_timeout": 10,
     }
 
     def connect(cursorclass=DictCursor):
         return pymysql.connect(**config, cursorclass=cursorclass)
 
     # Force every application request to the exact opt-in synthetic database.
-    monkeypatch.setattr(app_module, "get_conn", connect)
-    with connect() as conn, conn.cursor() as cur:
-        cur.execute("SELECT DATABASE() AS db")
-        assert cur.fetchone()["db"] == name
-        cur.execute("SHOW TABLES LIKE 'sim_purchase'")
-        assert cur.fetchone(), "run all seven migrations on the isolated database first"
-        cur.execute("SHOW COLUMNS FROM sim_purchase LIKE 'price_cent'")
-        assert cur.fetchone(), "V009 is required"
+    for variable, value in {
+        "DB_HOST": config["host"],
+        "DB_PORT": str(config["port"]),
+        "DB_USER": config["user"],
+        "DB_PASS": config["password"],
+        "DB_NAME": name,
+        "DB_SOCKET": "",
+        "DB_POOL_ENABLED": "true",
+    }.items():
+        monkeypatch.setenv(variable, value)
+    for variable in ("DB_POOL_SIZE", "DB_POOL_OVERFLOW", "DB_POOL_TIMEOUT"):
+        monkeypatch.delenv(variable, raising=False)
+    db.dispose_pool()
+    try:
+        with db.get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT DATABASE() AS db")
+            assert cur.fetchone()["db"] == name
+            cur.execute("SELECT @@transaction_isolation AS isolation_level")
+            assert cur.fetchone()["isolation_level"] == "REPEATABLE-READ"
+            cur.execute("SHOW TABLES LIKE 'sim_purchase'")
+            assert cur.fetchone(), "run all seven migrations on the isolated database first"
+            cur.execute("SHOW COLUMNS FROM sim_purchase LIKE 'price_cent'")
+            assert cur.fetchone(), "V009 is required"
 
-    cards = []
-    tokens = []
+        cards = []
+        tokens = []
 
-    def make_card(owner="alice", seed_usage=False):
-        iccid = "TEST" + uuid.uuid4().hex[:24].upper()
-        with connect() as conn, conn.cursor() as cur:
-            cur.execute("SELECT user_id FROM user_account WHERE username=%s", (owner,))
-            user = cur.fetchone()
-            assert user, "V006 demo users are required"
-            cur.execute(
-                "INSERT INTO sim_card(iccid, status, owner_user_id) VALUES(%s, 'ACTIVE', %s)",
-                (iccid, user["user_id"]),
-            )
-            if seed_usage:
-                cur.execute(
-                    "INSERT INTO sim_usage(iccid, month, used_mb, package_mb) VALUES(%s, '2031-07', 200, 1024)",
-                    (iccid,),
-                )
-            conn.commit()
-        cards.append(iccid)
-        return iccid
-
-    def scalar(sql, params=()):
-        with connect() as conn, conn.cursor() as cur:
-            cur.execute(sql, params)
-            return next(iter(cur.fetchone().values()))
-
-    with TestClient(app_module.app) as client:
-        def login(username, password):
-            response = client.post("/auth/login", json={"username": username, "password": password})
-            assert response.status_code == 200, response.text
-            token = response.json()["data"]["token"]
-            tokens.append(token)
-            return token
-
-        case = SimpleNamespace(
-            client=client, connect=connect, make_card=make_card, scalar=scalar,
-            alice=login("alice", "user1pass"), bob=login("bob", "user2pass"),
-        )
-        try:
-            yield case
-        finally:
+        def make_card(owner="alice", seed_usage=False):
+            iccid = "TEST" + uuid.uuid4().hex[:24].upper()
             with connect() as conn, conn.cursor() as cur:
-                for iccid in cards:
-                    cur.execute("DELETE FROM sim_card WHERE iccid=%s", (iccid,))
-                for token in tokens:
-                    cur.execute("DELETE FROM auth_token WHERE token=%s", (token,))
+                cur.execute("SELECT user_id FROM user_account WHERE username=%s", (owner,))
+                user = cur.fetchone()
+                assert user, "V006 demo users are required"
+                cur.execute(
+                    "INSERT INTO sim_card(iccid, status, owner_user_id) VALUES(%s, 'ACTIVE', %s)",
+                    (iccid, user["user_id"]),
+                )
+                if seed_usage:
+                    cur.execute(
+                        "INSERT INTO sim_usage(iccid, month, used_mb, package_mb) "
+                        "VALUES(%s, '2031-07', 200, 1024)",
+                        (iccid,),
+                    )
                 conn.commit()
+            cards.append(iccid)
+            return iccid
+
+        def scalar(sql, params=()):
+            with connect() as conn, conn.cursor() as cur:
+                cur.execute(sql, params)
+                return next(iter(cur.fetchone().values()))
+
+        with TestClient(app_module.app) as client:
+
+            def login(username, password):
+                response = client.post(
+                    "/auth/login", json={"username": username, "password": password}
+                )
+                assert response.status_code == 200, response.text
+                token = response.json()["data"]["token"]
+                tokens.append(token)
+                return token
+
+            case = SimpleNamespace(
+                client=client,
+                tokens=tokens,
+                connect=connect,
+                make_card=make_card,
+                scalar=scalar,
+            )
+            try:
+                case.alice = login("alice", "user1pass")
+                case.bob = login("bob", "user2pass")
+                yield case
+            finally:
+                with connect() as conn, conn.cursor() as cur:
+                    for iccid in cards:
+                        cur.execute("DELETE FROM sim_card WHERE iccid=%s", (iccid,))
+                    for token in tokens:
+                        cur.execute("DELETE FROM auth_token WHERE token=%s", (token,))
+                    conn.commit()
+    finally:
+        db.dispose_pool()
 
 
 def headers(token, transid=None):
@@ -107,7 +134,8 @@ def headers(token, transid=None):
 
 def purchase(case, iccid, body, key=None, token=None):
     return case.client.post(
-        f"/sims/{iccid}/purchase", json=body,
+        f"/sims/{iccid}/purchase",
+        json=body,
         headers=headers(token or case.alice, key),
     )
 
@@ -121,7 +149,9 @@ def test_http_flow_replay_conflict_and_ownership(db_case):
     body = {"month": "2031-07", "package_mb": 77, "product_id": "pkg_77", "pay_amount_cent": 123}
     search = case.client.get("/sims/search", params={"iccid": iccid}, headers=headers(case.alice))
     assert search.status_code == 200 and search.json()["data"]["iccid"] == iccid
-    usage = case.client.get(f"/sims/{iccid}/usage", params={"month": "2031-07"}, headers=headers(case.alice))
+    usage = case.client.get(
+        f"/sims/{iccid}/usage", params={"month": "2031-07"}, headers=headers(case.alice)
+    )
     assert usage.status_code == 200 and usage.json()["data"]["package_mb"] == 1024
 
     first = purchase(case, iccid, body, key)
@@ -130,9 +160,14 @@ def test_http_flow_replay_conflict_and_ownership(db_case):
     assert (order["product_id"], order["price_cent"]) == ("pkg_77", 123)
     same = purchase(case, iccid, body, key)
     assert same.status_code == 200 and same.json()["data"]["order_id"] == order["order_id"]
-    listing = case.client.get(f"/sims/{iccid}/purchases", params={"month": "2031-07"}, headers=headers(case.alice))
+    listing = case.client.get(
+        f"/sims/{iccid}/purchases", params={"month": "2031-07"}, headers=headers(case.alice)
+    )
     assert listing.status_code == 200
-    assert (listing.json()["data"]["items"][0]["product_id"], listing.json()["data"]["items"][0]["price_cent"]) == ("pkg_77", 123)
+    assert (
+        listing.json()["data"]["items"][0]["product_id"],
+        listing.json()["data"]["items"][0]["price_cent"],
+    ) == ("pkg_77", 123)
 
     variations = [
         (iccid, {**body, "month": "2031-08"}),
@@ -149,12 +184,20 @@ def test_http_flow_replay_conflict_and_ownership(db_case):
     cross_owner_key = purchase(case, bob_card, body, key, case.bob)
     assert cross_owner_key.status_code == 409 and "data" not in cross_owner_key.json()
     assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE transid=%s", (key,)) == 1
-    assert case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,)) == 1101
+    assert (
+        case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,))
+        == 1101
+    )
 
     null_key = "synthetic-" + uuid.uuid4().hex
     null_body = {"month": "2031-07", "package_mb": 1}
     assert purchase(case, iccid, null_body, null_key).status_code == 200
-    assert purchase(case, iccid, {**null_body, "product_id": None, "pay_amount_cent": None}, null_key).status_code == 200
+    assert (
+        purchase(
+            case, iccid, {**null_body, "product_id": None, "pay_amount_cent": None}, null_key
+        ).status_code
+        == 200
+    )
     assert purchase(case, iccid, {**null_body, "pay_amount_cent": 0}, null_key).status_code == 409
 
 
@@ -180,21 +223,48 @@ def test_insert_race_uses_real_unique_key(db_case, monkeypatch, different):
                         observed.append(error)
                 raise
 
-    monkeypatch.setattr(app_module, "get_conn", lambda: case.connect(cursorclass=RacingCursor))
+    monkeypatch.setattr(db, "DictCursor", RacingCursor)
+    db.dispose_pool()
     body = {"month": "2031-07", "package_mb": 100, "product_id": None, "pay_amount_cent": None}
     other_body = {**body, "pay_amount_cent": 1} if different else body
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(purchase, case, iccid, body, key)
-        second = pool.submit(purchase, case, iccid, other_body, key)
-        responses = [first.result(timeout=20), second.result(timeout=20)]
-    assert sorted(response.status_code for response in responses) == ([200, 409] if different else [200, 200])
-    assert len(observed) == 1 and app_module.transid_duplicate(observed[0])
+        try:
+            first = pool.submit(purchase, case, iccid, body, key)
+            second = pool.submit(purchase, case, iccid, other_body, key)
+            responses = [first.result(timeout=20), second.result(timeout=20)]
+        finally:
+            barrier.abort()
+    assert sorted(response.status_code for response in responses) == (
+        [200, 409] if different else [200, 200]
+    )
+    assert len(observed) == 1 and purchases.transid_duplicate(observed[0])
     assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE transid=%s", (key,)) == 1
-    assert case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,)) == 100
+    assert (
+        case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,))
+        == 100
+    )
     if different:
-        assert next(response.json() for response in responses if response.status_code == 409) == {"detail": "X-TransId conflict"}
+        assert next(response.json() for response in responses if response.status_code == 409) == {
+            "detail": "X-TransId conflict"
+        }
     else:
         assert responses[0].json()["data"]["order_id"] == responses[1].json()["data"]["order_id"]
+
+
+def test_requests_without_keys_create_distinct_orders(db_case):
+    case = db_case
+    iccid = case.make_card(seed_usage=True)
+    body = {"month": "2031-07", "package_mb": 1}
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        responses = list(pool.map(lambda _: purchase(case, iccid, body), range(20), timeout=30))
+    assert all(response.status_code == 200 for response in responses)
+    assert len({response.json()["data"]["order_id"] for response in responses}) == 20
+    assert len({response.json()["trace"]["transid"] for response in responses}) == 20
+    assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE iccid=%s", (iccid,)) == 20
+    assert (
+        case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,))
+        == 1044
+    )
 
 
 def test_non_transid_integrity_error_is_not_a_replay(db_case, monkeypatch):
@@ -203,18 +273,13 @@ def test_non_transid_integrity_error_is_not_a_replay(db_case, monkeypatch):
     fixed_order_id = "PO203001010000001234"
     with case.connect() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO sim_purchase(order_id, iccid, month, package_mb, status, transid) VALUES(%s,%s,'2031-07',1,'SUCCESS',%s)",
+            "INSERT INTO sim_purchase(order_id, iccid, month, package_mb, status, transid) "
+            "VALUES(%s,%s,'2031-07',1,'SUCCESS',%s)",
             (fixed_order_id, iccid, "existing-" + uuid.uuid4().hex),
         )
         conn.commit()
 
-    class FixedDatetime:
-        @staticmethod
-        def now():
-            return datetime(2030, 1, 1, 0, 0, 0)
-
-    monkeypatch.setattr(app_module, "datetime", FixedDatetime)
-    monkeypatch.setattr(app_module.random, "randint", lambda _start, _end: 1234)
+    monkeypatch.setattr(purchases, "new_order_id", lambda: fixed_order_id)
     key = "other-" + uuid.uuid4().hex
     response = purchase(case, iccid, {"month": "2031-07", "package_mb": 4}, key)
     assert response.status_code == 500 and response.json() == {"detail": "DB_ERROR"}
@@ -246,13 +311,22 @@ def test_usage_write_error_and_overflow_rollback_order(db_case):
             conn.commit()
 
     with case.connect() as conn, conn.cursor() as cur:
-        cur.execute("INSERT INTO sim_usage(iccid, month, used_mb, package_mb) VALUES(%s,'2031-07',0,2147483646)", (iccid,))
+        cur.execute(
+            "INSERT INTO sim_usage(iccid, month, used_mb, package_mb) "
+            "VALUES(%s,'2031-07',0,2147483646)",
+            (iccid,),
+        )
         conn.commit()
     overflow_key = "overflow-" + uuid.uuid4().hex
     overflow = purchase(case, iccid, {"month": "2031-07", "package_mb": 2}, overflow_key)
-    assert overflow.status_code == 409 and overflow.json() == {"detail": "package_mb capacity exceeded"}
+    assert overflow.status_code == 409 and overflow.json() == {
+        "detail": "package_mb capacity exceeded"
+    }
     assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE transid=%s", (overflow_key,)) == 0
-    assert case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,)) == 2147483646
+    assert (
+        case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,))
+        == 2147483646
+    )
 
 
 def test_input_bounds_and_shared_month_validation(db_case):
@@ -260,16 +334,38 @@ def test_input_bounds_and_shared_month_validation(db_case):
     iccid = case.make_card()
     for month in ["2031-00", "2031-13", "2031-1", "0000-01", "2031-01extra", "２０３１-０１"]:
         assert purchase(case, iccid, {"month": month, "package_mb": 1}).status_code == 400
-        assert case.client.get(f"/sims/{iccid}/usage", params={"month": month}, headers=headers(case.alice)).status_code == 400
-        assert case.client.get(f"/sims/{iccid}/purchases", params={"month": month}, headers=headers(case.alice)).status_code == 400
+        assert (
+            case.client.get(
+                f"/sims/{iccid}/usage", params={"month": month}, headers=headers(case.alice)
+            ).status_code
+            == 400
+        )
+        assert (
+            case.client.get(
+                f"/sims/{iccid}/purchases", params={"month": month}, headers=headers(case.alice)
+            ).status_code
+            == 400
+        )
     for value in [0, -1, 2_147_483_648, True, 1.5]:
         assert purchase(case, iccid, {"month": "2031-07", "package_mb": value}).status_code == 422
     for value in [-1, 2_147_483_648, True]:
-        assert purchase(case, iccid, {"month": "2031-07", "package_mb": 1, "pay_amount_cent": value}).status_code == 422
-    assert purchase(case, iccid, {"month": "2031-07", "package_mb": 1, "product_id": "x" * 65}).status_code == 422
+        assert (
+            purchase(
+                case, iccid, {"month": "2031-07", "package_mb": 1, "pay_amount_cent": value}
+            ).status_code
+            == 422
+        )
+    assert (
+        purchase(
+            case, iccid, {"month": "2031-07", "package_mb": 1, "product_id": "x" * 65}
+        ).status_code
+        == 422
+    )
     for key in ["", " ", "x" * 65]:
         assert purchase(case, iccid, {"month": "2031-07", "package_mb": 1}, key).status_code == 400
-    converted = purchase(case, iccid, {"month": "2031-07", "package_mb": "2", "pay_amount_cent": "0"})
+    converted = purchase(
+        case, iccid, {"month": "2031-07", "package_mb": "2", "pay_amount_cent": "0"}
+    )
     assert converted.status_code == 200 and converted.json()["data"]["package_mb"] == 2
     assert converted.json()["data"]["price_cent"] == 0
     assert converted.json()["trace"]["transid"]
@@ -278,12 +374,16 @@ def test_input_bounds_and_shared_month_validation(db_case):
 def test_repeating_safe_seed_keeps_new_usage(db_case):
     case = db_case
     iccid = "8986001200000000001"
-    before = case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2025-08'", (iccid,))
+    before = case.scalar(
+        "SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2025-08'", (iccid,)
+    )
     key = "seed-check-" + uuid.uuid4().hex
     try:
         added = purchase(case, iccid, {"month": "2025-08", "package_mb": 7}, key)
         assert added.status_code == 200, added.text
-        updated = case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2025-08'", (iccid,))
+        updated = case.scalar(
+            "SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2025-08'", (iccid,)
+        )
         assert updated == before + 7
         source = (ROOT / "db" / "seed.sql").read_text(encoding="utf-8")
         source = source.replace("USE iot_sim_ops;", f"USE `{os.environ['IOT_TEST_DB_NAME']}`;")
@@ -292,9 +392,277 @@ def test_repeating_safe_seed_keeps_new_usage(db_case):
                 if statement.strip():
                     cur.execute(statement)
             conn.commit()
-        assert case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2025-08'", (iccid,)) == updated
+        assert (
+            case.scalar(
+                "SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2025-08'", (iccid,)
+            )
+            == updated
+        )
     finally:
         with case.connect() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM sim_purchase WHERE transid=%s", (key,))
-            cur.execute("UPDATE sim_usage SET package_mb=%s WHERE iccid=%s AND month='2025-08'", (before, iccid))
+            cur.execute(
+                "UPDATE sim_usage SET package_mb=%s WHERE iccid=%s AND month='2025-08'",
+                (before, iccid),
+            )
             conn.commit()
+
+
+@pytest.mark.parametrize("explicit_keys", [True, False], ids=["distinct-keys", "no-keys"])
+def test_first_purchase_concurrent_distinct_requests(db_case, monkeypatch, explicit_keys):
+    case = db_case
+    iccid = case.make_card()
+    barrier = threading.Barrier(2)
+
+    class FirstPurchaseCursor(DictCursor):
+        def execute(self, query, args=None):
+            result = super().execute(query, args)
+            if "INSERT INTO sim_purchase" in query and args[1] == iccid:
+                # Both orders exist before either request can create the first usage row.
+                barrier.wait(timeout=10)
+            return result
+
+    monkeypatch.setattr(db, "DictCursor", FirstPurchaseCursor)
+    db.dispose_pool()
+    keys = ["first-" + uuid.uuid4().hex for _ in range(2)] if explicit_keys else [None, None]
+    amounts = [17, 29]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        try:
+            futures = [
+                pool.submit(purchase, case, iccid, {"month": "2031-07", "package_mb": amount}, key)
+                for amount, key in zip(amounts, keys)
+            ]
+            responses = [future.result(timeout=20) for future in futures]
+        finally:
+            barrier.abort()
+    assert [response.status_code for response in responses] == [200, 200]
+    assert len({response.json()["data"]["order_id"] for response in responses}) == 2
+    assert len({response.json()["trace"]["transid"] for response in responses}) == 2
+    assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE iccid=%s", (iccid,)) == 2
+    with case.connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT month, package_mb, used_mb FROM sim_usage WHERE iccid=%s", (iccid,))
+        assert cur.fetchall() == [{"month": "2031-07", "package_mb": sum(amounts), "used_mb": 0}]
+
+
+def test_capacity_limit_rolls_back(db_case):
+    case = db_case
+    iccid = case.make_card()
+    first = purchase(case, iccid, {"month": "2031-07", "package_mb": purchases.INT_MAX})
+    assert first.status_code == 200, first.text
+    key = "capacity-" + uuid.uuid4().hex
+    failed = purchase(case, iccid, {"month": "2031-07", "package_mb": 1}, key)
+    assert failed.status_code == 409
+    assert failed.json() == {"detail": "package_mb capacity exceeded"}
+    assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE transid=%s", (key,)) == 0
+    assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE iccid=%s", (iccid,)) == 1
+    with case.connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT package_mb, used_mb FROM sim_usage WHERE iccid=%s", (iccid,))
+        assert cur.fetchall() == [{"package_mb": purchases.INT_MAX, "used_mb": 0}]
+
+
+def fail_purchase_readback(monkeypatch, iccid):
+    state = SimpleNamespace(enabled=True, connection_ids=[])
+
+    class ReadbackCursor(DictCursor):
+        usage_written = False
+
+        def execute(self, query, args=None):
+            if "INSERT INTO sim_purchase" in query and args[1] == iccid:
+                super().execute("SELECT CONNECTION_ID() AS connection_id")
+                state.connection_ids.append(self.fetchone()["connection_id"])
+            if (
+                self.usage_written
+                and query.startswith("SELECT * FROM sim_purchase")
+                and state.enabled
+            ):
+                state.enabled = False
+                raise pymysql.err.OperationalError(1644, "synthetic purchase readback failure")
+            result = super().execute(query, args)
+            if query.strip().startswith("UPDATE sim_usage") and args[1] == iccid:
+                self.usage_written = self.rowcount == 1
+            return result
+
+    monkeypatch.setattr(db, "DictCursor", ReadbackCursor)
+    db.dispose_pool()
+    return state
+
+
+@pytest.mark.parametrize("seed_usage", [False, True], ids=["new-usage", "existing-usage"])
+def test_purchase_readback_failure_rolls_back(db_case, monkeypatch, seed_usage):
+    case = db_case
+    iccid = case.make_card(seed_usage=seed_usage)
+    state = fail_purchase_readback(monkeypatch, iccid)
+    key = "readback-" + uuid.uuid4().hex
+    body = {"month": "2031-07", "package_mb": 7}
+    failed = purchase(case, iccid, body, key)
+    assert failed.status_code == 500 and failed.json() == {"detail": "DB_ERROR"}
+    assert not state.enabled
+    assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE transid=%s", (key,)) == 0
+    with case.connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT package_mb, used_mb FROM sim_usage WHERE iccid=%s", (iccid,))
+        rows = cur.fetchall()
+        assert list(rows) == ([{"package_mb": 1024, "used_mb": 200}] if seed_usage else [])
+
+    retried = purchase(case, iccid, body, key)
+    assert retried.status_code == 200, retried.text
+    replayed = purchase(case, iccid, body, key)
+    assert replayed.status_code == 200 and replayed.json() == retried.json()
+    assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE transid=%s", (key,)) == 1
+    with case.connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT package_mb, used_mb FROM sim_usage WHERE iccid=%s", (iccid,))
+        assert cur.fetchall() == [
+            {"package_mb": (1024 if seed_usage else 0) + 7, "used_mb": 200 if seed_usage else 0}
+        ]
+
+
+def test_pooled_connection_is_clean_after_failed_request(db_case, monkeypatch):
+    case = db_case
+    iccid = case.make_card()
+    monkeypatch.setenv("DB_POOL_SIZE", "1")
+    monkeypatch.setenv("DB_POOL_OVERFLOW", "0")
+    state = fail_purchase_readback(monkeypatch, iccid)
+    key = "pooled-" + uuid.uuid4().hex
+    body = {"month": "2031-07", "package_mb": 11}
+    failed = purchase(case, iccid, body, key)
+    assert failed.status_code == 500 and failed.json() == {"detail": "DB_ERROR"}
+    assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE transid=%s", (key,)) == 0
+    assert case.scalar("SELECT COUNT(*) FROM sim_usage WHERE iccid=%s", (iccid,)) == 0
+    assert db._connection_pool().checkedout() == 0
+    retried = purchase(case, iccid, body, key)
+    assert retried.status_code == 200, retried.text
+    assert len(state.connection_ids) == 2
+    assert state.connection_ids[0] == state.connection_ids[1]
+    assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE transid=%s", (key,)) == 1
+    assert case.scalar("SELECT package_mb FROM sim_usage WHERE iccid=%s", (iccid,)) == 11
+    assert db._connection_pool().checkedout() == 0
+
+
+def test_status_and_oplog_are_atomic(db_case):
+    case = db_case
+    iccid = case.make_card()
+    trigger = "test_oplog_fail_" + uuid.uuid4().hex[:12]
+    with case.connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"CREATE TRIGGER `{trigger}` BEFORE INSERT ON sim_op_log FOR EACH ROW "
+            f"BEGIN IF NEW.iccid = '{iccid}' THEN "
+            "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'synthetic oplog failure'; "
+            "END IF; END"
+        )
+        conn.commit()
+    try:
+        failed = case.client.patch(
+            f"/sims/{iccid}/status", json={"action": "SUSPEND"}, headers=headers(case.alice)
+        )
+        assert failed.status_code == 500 and failed.json() == {"detail": "DB_ERROR"}
+        assert case.scalar("SELECT status FROM sim_card WHERE iccid=%s", (iccid,)) == "ACTIVE"
+        assert case.scalar("SELECT COUNT(*) FROM sim_op_log WHERE iccid=%s", (iccid,)) == 0
+    finally:
+        with case.connect() as conn, conn.cursor() as cur:
+            cur.execute(f"DROP TRIGGER `{trigger}`")
+            conn.commit()
+
+    succeeded = case.client.patch(
+        f"/sims/{iccid}/status", json={"action": "SUSPEND"}, headers=headers(case.alice)
+    )
+    assert succeeded.status_code == 200
+    assert succeeded.json()["data"] == {"iccid": iccid, "status": "SUSPENDED"}
+    assert case.scalar("SELECT status FROM sim_card WHERE iccid=%s", (iccid,)) == "SUSPENDED"
+    with case.connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT op_type, op_result FROM sim_op_log WHERE iccid=%s", (iccid,))
+        assert cur.fetchall() == [{"op_type": "SUSPEND", "op_result": "SUCCESS"}]
+
+
+def test_repeated_status_is_audited_noop(db_case):
+    case = db_case
+    iccid = case.make_card()
+    for _ in range(2):
+        response = case.client.patch(
+            f"/sims/{iccid}/status", json={"action": "SUSPEND"}, headers=headers(case.alice)
+        )
+        assert response.status_code == 200
+        assert response.json()["data"] == {"iccid": iccid, "status": "SUSPENDED"}
+    deactivated = case.make_card()
+    with case.connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT op_result FROM sim_op_log WHERE iccid=%s ORDER BY id", (iccid,))
+        assert cur.fetchall() == [{"op_result": "SUCCESS"}, {"op_result": "NOOP"}]
+        cur.execute("UPDATE sim_card SET status='DEACTIVATED' WHERE iccid=%s", (deactivated,))
+        conn.commit()
+    for action in ("SUSPEND", "RESUME"):
+        response = case.client.patch(
+            f"/sims/{deactivated}/status", json={"action": action}, headers=headers(case.alice)
+        )
+        assert response.status_code == 409 and response.json() == {"detail": "sim deactivated"}
+    assert (
+        case.scalar("SELECT status FROM sim_card WHERE iccid=%s", (deactivated,)) == "DEACTIVATED"
+    )
+    assert case.scalar("SELECT COUNT(*) FROM sim_op_log WHERE iccid=%s", (deactivated,)) == 0
+
+
+def test_concurrent_logins_do_not_deadlock(db_case, monkeypatch):
+    case = db_case
+    barrier = threading.Barrier(8)
+
+    class LoginCursor(DictCursor):
+        def execute(self, query, args=None):
+            # Release all logins together just before their first write, where the old
+            # INSERT-then-UPDATE order made every request upgrade a shared parent lock.
+            if query.lstrip().startswith(("UPDATE user_account", "INSERT INTO auth_token")):
+                if not getattr(self.connection, "login_released", False):
+                    self.connection.login_released = True
+                    barrier.wait(timeout=30)
+            return super().execute(query, args)
+
+    monkeypatch.setattr(db, "DictCursor", LoginCursor)
+    db.dispose_pool()
+    token_lock = threading.Lock()
+
+    def login():
+        response = case.client.post(
+            "/auth/login", json={"username": "alice", "password": "user1pass"}
+        )
+        # Register successful tokens even if a sibling request fails.
+        if response.status_code == 200:
+            with token_lock:
+                case.tokens.append(response.json()["data"]["token"])
+        return response
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        try:
+            futures = [pool.submit(login) for _ in range(8)]
+            responses = [future.result(timeout=30) for future in futures]
+        finally:
+            barrier.abort()
+    assert [response.status_code for response in responses] == [200] * 8
+    assert len({response.json()["data"]["token"] for response in responses}) == 8
+
+
+def test_purchase_list_order_is_stable(db_case):
+    case = db_case
+    iccid = case.make_card()
+    inserted = []
+    with case.connect() as conn, conn.cursor() as cur:
+        for _ in range(3):
+            order_id = purchases.new_order_id()
+            cur.execute(
+                "INSERT INTO sim_purchase "
+                "(order_id, iccid, month, package_mb, status, transid, created_at) "
+                "VALUES (%s,%s,'2031-07',1,'SUCCESS',%s,'2031-07-01 12:00:00')",
+                (order_id, iccid, "order-" + uuid.uuid4().hex),
+            )
+            inserted.append((cur.lastrowid, order_id))
+        conn.commit()
+    expected = [order_id for _, order_id in sorted(inserted, reverse=True)]
+
+    def order_ids(limit, offset):
+        response = case.client.get(
+            f"/sims/{iccid}/purchases",
+            params={"month": "2031-07", "limit": limit, "offset": offset},
+            headers=headers(case.alice),
+        )
+        assert response.status_code == 200, response.text
+        return [item["order_id"] for item in response.json()["data"]["items"]]
+
+    assert order_ids(20, 0) == expected
+    assert order_ids(2, 0) == expected[:2]
+    assert order_ids(2, 2) == expected[2:]
+    assert order_ids(2, 4) == []

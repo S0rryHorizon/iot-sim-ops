@@ -1,5 +1,5 @@
 {
-  "name": "iot-sim-ops (UserAuth v3)",
+  "name": "iot-sim-ops (local)",
   "values": [
     {
       "key": "baseUrl",
@@ -17,11 +17,6 @@
       "enabled": true
     },
     {
-      "key": "token",
-      "value": "",
-      "enabled": true
-    },
-    {
       "key": "iccid",
       "value": "8986001200000000001",
       "enabled": true
@@ -32,12 +27,20 @@
       "enabled": true
     },
     {
+      "key": "token",
+      "value": "",
+      "enabled": true
+    },
+    {
       "key": "transid",
+      "value": "",
+      "enabled": true
+    },
+    {
+      "key": "orderId",
       "value": "",
       "enabled": true
     }
   ],
-  "_postman_variable_scope": "environment",
-  "_postman_exported_at": "2025-08-21T06:31:22.713138Z",
-  "_postman_exported_using": "ChatGPT Python UV"
+  "_postman_variable_scope": "environment"
 }

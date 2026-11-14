@@ -1,0 +1,479 @@
+{
+  "info": {
+    "name": "iot-sim-ops",
+    "description": "按顺序运行：登录、查卡、用量、幂等订购（新单 / 重放 / 冲突）、订单列表、停复机。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1 登录并保存 token",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "pm.environment.set('token', pm.response.json().data.token);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/auth/login",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "auth",
+            "login"
+          ],
+          "query": []
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "2 按 ICCID 查卡",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/search?iccid={{iccid}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "search"
+          ],
+          "query": [
+            {
+              "key": "iccid",
+              "value": "{{iccid}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "3 查询卡状态",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/{{iccid}}/status",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "{{iccid}}",
+            "status"
+          ],
+          "query": []
+        }
+      }
+    },
+    {
+      "name": "4 查询当月用量",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/{{iccid}}/usage?month={{month}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "{{iccid}}",
+            "usage"
+          ],
+          "query": [
+            {
+              "key": "month",
+              "value": "{{month}}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "5 订购加包（生成新的 X-TransId）",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.environment.set('transid', pm.variables.replaceIn('{{$guid}}'));"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "pm.environment.set('orderId', pm.response.json().data.order_id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-TransId",
+            "value": "{{transid}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/{{iccid}}/purchase",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "{{iccid}}",
+            "purchase"
+          ],
+          "query": []
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"month\": \"{{month}}\",\n  \"package_mb\": 1024,\n  \"product_id\": \"pkg_1024m\",\n  \"pay_amount_cent\": 1024\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "6 同一 X-TransId 重放：返回同一订单",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));",
+              "pm.test('同一订单', () => pm.expect(pm.response.json().data.order_id).to.eql(pm.environment.get('orderId')));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-TransId",
+            "value": "{{transid}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/{{iccid}}/purchase",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "{{iccid}}",
+            "purchase"
+          ],
+          "query": []
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"month\": \"{{month}}\",\n  \"package_mb\": 1024,\n  \"product_id\": \"pkg_1024m\",\n  \"pay_amount_cent\": 1024\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "7 同一 X-TransId 换参数：409 冲突",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('409', () => pm.response.to.have.status(409));",
+              "pm.test('冲突原因', () => pm.expect(pm.response.json().detail).to.eql('X-TransId conflict'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "X-TransId",
+            "value": "{{transid}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/{{iccid}}/purchase",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "{{iccid}}",
+            "purchase"
+          ],
+          "query": []
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"month\": \"{{month}}\",\n  \"package_mb\": 2048,\n  \"product_id\": \"pkg_1024m\",\n  \"pay_amount_cent\": 1024\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "8 订单列表",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/{{iccid}}/purchases?month={{month}}&limit=20&offset=0",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "{{iccid}}",
+            "purchases"
+          ],
+          "query": [
+            {
+              "key": "month",
+              "value": "{{month}}"
+            },
+            {
+              "key": "limit",
+              "value": "20"
+            },
+            {
+              "key": "offset",
+              "value": "0"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "9 停机",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/{{iccid}}/status",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "{{iccid}}",
+            "status"
+          ],
+          "query": []
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"action\": \"SUSPEND\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "10 复机",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/sims/{{iccid}}/status",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "sims",
+            "{{iccid}}",
+            "status"
+          ],
+          "query": []
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"action\": \"RESUME\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

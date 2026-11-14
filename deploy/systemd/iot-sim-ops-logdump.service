@@ -1,0 +1,8 @@
+# 可选：配合同名 timer，每 10 分钟把 API 的 journald 日志导出为文件。
+[Unit]
+Description=Export recent iot-sim-ops API logs to files
+
+[Service]
+Type=oneshot
+User=iot
+ExecStart=/opt/iot-sim-ops/deploy/export_logs.sh

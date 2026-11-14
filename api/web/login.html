@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>iot-sim-ops · 登录</title>
+  <link rel="stylesheet" href="login.css" />
+  <script src="login.js" defer></script>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>登录 iot-sim-ops</h1>
+      <form id="f" autocomplete="off">
+        <label for="username">用户名</label>
+        <input id="username" placeholder="请输入用户名" autocomplete="username" />
+
+        <label for="password">密码</label>
+        <input id="password" type="password" placeholder="请输入密码" autocomplete="current-password" />
+
+        <button type="submit">登录</button>
+        <div id="err" class="err"></div>
+        <div class="muted">演示账号：alice / user1pass，或 bob / user2pass</div>
+      </form>
+    </div>
+  </div>
+</body>
+</html>
+
