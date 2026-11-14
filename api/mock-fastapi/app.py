@@ -3,14 +3,18 @@ import logging
 import sys
 import time
 import uuid
+import secrets
+from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path as SysPath
 from datetime import datetime
-import random
 import re
 from typing import Optional
 
 import pymysql
 from pymysql.cursors import DictCursor
+from sqlalchemy.pool import QueuePool
+from sqlalchemy.exc import TimeoutError as PoolTimeout
 import bcrypt
 from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
@@ -94,7 +98,7 @@ app.mount(
 )
 
 # -------- DB helpers --------
-def get_conn():
+def _open_connection():
     return pymysql.connect(
         host=os.getenv("DB_HOST", "127.0.0.1"),
         port=int(os.getenv("DB_PORT", "3306")),
@@ -104,7 +108,54 @@ def get_conn():
         charset="utf8mb4",
         autocommit=False,
         cursorclass=DictCursor,
+        unix_socket=os.getenv("DB_SOCKET") or None,
+        connect_timeout=5,
+        read_timeout=10,
+        write_timeout=10,
     )
+
+
+@lru_cache(maxsize=1)
+def _connection_pool():
+    # A pool belongs to one server process. Returned connections are rolled back;
+    # an authentication SELECT must not leak its transaction into the next request.
+    return QueuePool(
+        _open_connection,
+        pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+        max_overflow=int(os.getenv("DB_POOL_OVERFLOW", "10")),
+        timeout=float(os.getenv("DB_POOL_TIMEOUT", "5")),
+        recycle=1800,
+        reset_on_return="rollback",
+    )
+
+
+@contextmanager
+def get_conn():
+    if not parse_bool(os.getenv("DB_POOL_ENABLED", "true")):
+        connection = _open_connection()
+    else:
+        for attempt in range(2):
+            try:
+                connection = _connection_pool().connect()
+            except PoolTimeout:
+                raise HTTPException(status_code=503, detail="DB_BUSY") from None
+            try:
+                connection.ping(reconnect=False)
+                break
+            except pymysql.MySQLError:
+                connection.invalidate()
+                if attempt:
+                    raise HTTPException(status_code=503, detail="DB_UNAVAILABLE") from None
+    try:
+        yield connection
+    finally:
+        connection.close()
+
+
+def new_order_id():
+    # 120 random bits fit the existing VARCHAR(32), including the PO prefix.
+    # The database unique constraint remains the final guard.
+    return "PO" + secrets.token_hex(15)
 
 def require_auth_user(authorization: Optional[str]) -> dict:
     if not authorization or not authorization.lower().startswith("bearer "):
@@ -368,9 +419,7 @@ def purchase(iccid: str, body: PurchaseBody, authorization: Optional[str] = Head
     pkg = body.package_mb
     if x_transid is not None and (not x_transid.strip() or len(x_transid) > 64):
         raise HTTPException(status_code=400, detail="invalid X-TransId")
-    transid = x_transid if x_transid is not None else (
-        datetime.now().strftime("%Y%m%dT%H%M%S") + f"-{random.randint(1000,9999)}"
-    )
+    transid = x_transid if x_transid is not None else "AUTO-" + uuid.uuid4().hex
     requested = purchase_identity(iccid, month, pkg, body.product_id, body.pay_amount_cent)
     with get_conn() as conn, conn.cursor() as cur:
         try:
@@ -401,7 +450,7 @@ def purchase(iccid: str, body: PurchaseBody, authorization: Optional[str] = Head
             conn.rollback()
             raise HTTPException(status_code=500, detail="DB_ERROR") from error
 
-        order_id = "PO" + datetime.now().strftime("%Y%m%d%H%M%S") + f"{random.randint(1000,9999)}"
+        order_id = new_order_id()
         try:
             cur.execute(
                 """

@@ -197,6 +197,21 @@ def test_insert_race_uses_real_unique_key(db_case, monkeypatch, different):
         assert responses[0].json()["data"]["order_id"] == responses[1].json()["data"]["order_id"]
 
 
+def test_requests_without_keys_create_distinct_orders(db_case):
+    case = db_case
+    iccid = case.make_card(seed_usage=True)
+    body = {"month": "2031-07", "package_mb": 1}
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        responses = list(pool.map(lambda _: purchase(case, iccid, body), range(20)))
+    assert all(response.status_code == 200 for response in responses)
+    assert len({response.json()["data"]["order_id"] for response in responses}) == 20
+    assert len({response.json()["trace"]["transid"] for response in responses}) == 20
+    assert case.scalar("SELECT COUNT(*) FROM sim_purchase WHERE iccid=%s", (iccid,)) == 20
+    assert case.scalar(
+        "SELECT package_mb FROM sim_usage WHERE iccid=%s AND month='2031-07'", (iccid,)
+    ) == 1044
+
+
 def test_non_transid_integrity_error_is_not_a_replay(db_case, monkeypatch):
     case = db_case
     iccid = case.make_card()
@@ -208,13 +223,7 @@ def test_non_transid_integrity_error_is_not_a_replay(db_case, monkeypatch):
         )
         conn.commit()
 
-    class FixedDatetime:
-        @staticmethod
-        def now():
-            return datetime(2030, 1, 1, 0, 0, 0)
-
-    monkeypatch.setattr(app_module, "datetime", FixedDatetime)
-    monkeypatch.setattr(app_module.random, "randint", lambda _start, _end: 1234)
+    monkeypatch.setattr(app_module, "new_order_id", lambda: fixed_order_id)
     key = "other-" + uuid.uuid4().hex
     response = purchase(case, iccid, {"month": "2031-07", "package_mb": 4}, key)
     assert response.status_code == 500 and response.json() == {"detail": "DB_ERROR"}

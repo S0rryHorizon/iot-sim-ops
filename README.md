@@ -103,6 +103,19 @@ EOF
 # http://127.0.0.1:8000/web/login.html
 ```
 
+### 数据库连接与请求标识
+
+API 默认复用数据库连接。每个服务进程默认保留 10 个连接，最多临时增加 10 个，
+获取连接等待上限为 5 秒；可通过 `DB_POOL_SIZE`、`DB_POOL_OVERFLOW`、
+`DB_POOL_TIMEOUT` 配置。多 worker 部署时应把各进程的连接上限相加，给 MySQL
+管理连接预留空间。连接归还时回滚未提交事务，取出时检查断连；连接池耗尽返回
+`503 DB_BUSY`。`DB_POOL_ENABLED=false` 可关闭连接复用用于排查和同条件性能对照。
+测试可显式设置 `DB_SOCKET` 指向隔离的 MySQL Unix socket。
+
+订单号使用带 `PO` 前缀的 120 位随机标识，保持现有 32 字符字段；自动请求号使用
+UUID。数据库唯一约束继续兜底，只有 `uk_transid` 冲突可进入幂等重放，其他唯一键
+错误仍会回滚并报错。显式 `X-TransId` 的重试与冲突语义不变。
+
 ### 凭据与 CORS 安全
 
 * `.env` 和 `.env.systemd` 已被 Git 忽略；只提交不含真实密码的 `.env.example`。
@@ -117,7 +130,7 @@ python -m pip install \
   -r api/mock-fastapi/requirements.txt \
   -r api/mock-fastapi/requirements-dev.txt
 python -m compileall -q api/mock-fastapi
-python -m pytest -q tests/test_app.py
+python -m pytest -q tests/test_app.py tests/test_connection_pool.py
 ```
 
 不连接数据库的快速检查：`python -m pytest -q tests/test_app.py`。完整回归必须在专用、可清理的 MySQL 8 演示库中运行，先执行 `db/schema.sql` 和 `db/seed.sql`，再显式设置 `IOT_TEST_DB_ISOLATED=1`、`IOT_TEST_DB_NAME=iot_sim_ops` 及可选的 `IOT_TEST_DB_HOST/PORT/USER/PASS`，运行 `python -m pytest -q tests/test_db_integration.py tests/test_browser_integration.py`。浏览器测试还需 `python -m playwright install chromium`（Linux CI 使用 `--with-deps`），由 pytest 启动本地 Uvicorn 并连接同一隔离库。DB 测试夹具会清理自己创建的 synthetic 卡、订单和 token；浏览器登录另生成的 token 不由该夹具自动删除，需随专用测试库清理或等待过期。CI 的 `db-migrate` job 必跑两套测试，包含 TestClient HTTP 流、实际唯一键竞态、事务回滚、二次 seed 不覆盖用量，以及浏览器中的提交后响应丢失与乱序响应。切勿把这些变量指向需保留数据的库。
