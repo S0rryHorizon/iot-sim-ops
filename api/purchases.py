@@ -63,17 +63,13 @@ def purchase(
         raise HTTPException(status_code=400, detail="invalid X-TransId")
     transid = x_transid if x_transid is not None else "AUTO-" + uuid.uuid4().hex
     requested = purchase_identity(iccid, month, pkg, body.product_id, body.pay_amount_cent)
-    with db.get_conn() as conn, conn.cursor() as cur:
-        try:
-            require_owned_sim(cur, iccid, user["user_id"])
-            if x_transid is not None:
-                cur.execute("SELECT * FROM sim_purchase WHERE transid=%s", (transid,))
-                existing = cur.fetchone()
-                if existing:
-                    return replay_or_conflict(existing, requested, transid)
-        except pymysql.MySQLError as error:
-            conn.rollback()
-            raise HTTPException(status_code=500, detail="DB_ERROR") from error
+    with db.get_conn() as conn, db.rollback_on_error(conn), conn.cursor() as cur:
+        require_owned_sim(cur, iccid, user["user_id"])
+        if x_transid is not None:
+            cur.execute("SELECT * FROM sim_purchase WHERE transid=%s", (transid,))
+            existing = cur.fetchone()
+            if existing:
+                return replay_or_conflict(existing, requested, transid)
 
         order_id = new_order_id()
         try:
@@ -97,53 +93,41 @@ def purchase(
             )
         except pymysql.err.IntegrityError as error:
             # Only this INSERT's uk_transid race may become an idempotent replay.
-            conn.rollback()  # End the repeatable-read snapshot before reading the winner.
             if x_transid is None or not transid_duplicate(error):
-                raise HTTPException(status_code=500, detail="DB_ERROR") from error
-            try:
-                require_owned_sim(cur, iccid, user["user_id"])
-                cur.execute("SELECT * FROM sim_purchase WHERE transid=%s", (transid,))
-                winner = cur.fetchone()
-            except pymysql.MySQLError as read_error:
-                conn.rollback()
-                raise HTTPException(status_code=500, detail="DB_ERROR") from read_error
+                raise
+            conn.rollback()  # End the repeatable-read snapshot before reading the winner.
+            require_owned_sim(cur, iccid, user["user_id"])
+            cur.execute("SELECT * FROM sim_purchase WHERE transid=%s", (transid,))
+            winner = cur.fetchone()
             if not winner:
                 raise HTTPException(status_code=500, detail="DB_ERROR")
             return replay_or_conflict(winner, requested, transid)
-        except pymysql.MySQLError as error:
-            conn.rollback()
-            raise HTTPException(status_code=500, detail="DB_ERROR") from error
 
-        try:
-            # Lock any current usage row and reject a sum that cannot fit MySQL INT.
-            cur.execute(
-                "SELECT package_mb FROM sim_usage WHERE iccid=%s AND month=%s FOR UPDATE",
-                (iccid, month),
-            )
-            current_usage = cur.fetchone()
-            if current_usage and current_usage["package_mb"] > INT_MAX - pkg:
-                conn.rollback()
-                raise HTTPException(status_code=409, detail="package_mb capacity exceeded")
-            cur.execute(
-                """
-                INSERT INTO sim_usage (iccid, month, used_mb, package_mb)
-                VALUES (%s, %s, 0, %s)
-                ON DUPLICATE KEY UPDATE
-                    package_mb = package_mb + VALUES(package_mb),
-                    updated_at = NOW()
-                """,
-                (iccid, month, pkg),
-            )
-            conn.commit()
-            cur.execute("SELECT * FROM sim_purchase WHERE transid=%s", (transid,))
-            data = cur.fetchone()
-            if not data:
-                raise HTTPException(status_code=500, detail="DB_ERROR")
-        except pymysql.MySQLError as error:
-            conn.rollback()
-            raise HTTPException(status_code=500, detail="DB_ERROR") from error
-
-    return ok(data, transid)
+        cur.execute(
+            """
+            INSERT INTO sim_usage (iccid, month, used_mb, package_mb)
+            VALUES (%s, %s, 0, 0)
+            ON DUPLICATE KEY UPDATE package_mb = package_mb
+            """,
+            (iccid, month),
+        )
+        cur.execute(
+            """
+            UPDATE sim_usage
+            SET package_mb = package_mb + %s, updated_at = NOW()
+            WHERE iccid = %s AND month = %s AND package_mb <= %s
+            """,
+            (pkg, iccid, month, INT_MAX - pkg),
+        )
+        if cur.rowcount != 1:
+            raise HTTPException(status_code=409, detail="package_mb capacity exceeded")
+        cur.execute("SELECT * FROM sim_purchase WHERE transid=%s", (transid,))
+        data = cur.fetchone()
+        if not data:
+            raise HTTPException(status_code=500, detail="DB_ERROR")
+        response = ok(data, transid)
+        conn.commit()
+    return response
 
 
 @router.get("/sims/{iccid}/purchases")
@@ -170,7 +154,7 @@ def purchase_list(
                    status, transid, created_at
             FROM sim_purchase
             WHERE {" AND ".join(where)}
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT %s OFFSET %s
         """
         args.extend([limit, offset])

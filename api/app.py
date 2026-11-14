@@ -7,9 +7,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
+import pymysql
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, db, purchases
@@ -53,6 +55,13 @@ async def access_log_mw(request: Request, call_next):
     return resp
 
 
+async def database_error(request: Request, error: pymysql.MySQLError):
+    # Read-only routes have nothing to roll back; they only need the same error shape.
+    biz_logger.exception("Database query failed", exc_info=error)
+    http = db.http_error(error)
+    return JSONResponse(status_code=http.status_code, content={"detail": http.detail})
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     try:
@@ -62,8 +71,8 @@ async def lifespan(application: FastAPI):
 
 
 @router.get("/alive")
-def alive():
-    return {"ok": True, "service": "iot-sim-ops", "version": app.version}
+def alive(request: Request):
+    return {"ok": True, "service": "iot-sim-ops", "version": request.app.version}
 
 
 @router.get("/sims/search")
@@ -73,7 +82,6 @@ def sims_search(
     imsi: Optional[str] = Query(None),
     msisdn: Optional[str] = Query(None),
 ):
-
     if not any([iccid, imsi, msisdn]):
         raise HTTPException(status_code=400, detail="at least one of iccid/imsi/msisdn")
 
@@ -122,39 +130,31 @@ def change_status(iccid: str, body: ChangeStatus, user: dict = Depends(current_u
         raise HTTPException(status_code=400, detail="action must be SUSPEND or RESUME")
     new_status = "SUSPENDED" if action == "SUSPEND" else "ACTIVE"
 
-    with db.get_conn() as conn, conn.cursor() as cur:
-        row = require_owned_sim(cur, iccid, user["user_id"], columns="owner_user_id, status")
-
+    with db.get_conn() as conn, db.rollback_on_error(conn), conn.cursor() as cur:
+        row = require_owned_sim(
+            cur, iccid, user["user_id"], columns="owner_user_id, status", for_update=True
+        )
         old_status = row["status"]
-
-        try:
+        if old_status == "DEACTIVATED":
+            raise HTTPException(status_code=409, detail="sim deactivated")
+        changed = old_status != new_status
+        if changed:
             cur.execute("UPDATE sim_card SET status=%s WHERE iccid=%s", (new_status, iccid))
-            # 记录操作日志（如果没有该表就忽略报错）
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO sim_op_log (iccid, op_type, op_result, operator, created_at)
-                    VALUES (%s, %s, %s, %s, NOW())
-                    """,
-                    (iccid, action, "SUCCESS", user["username"]),
-                )
-            except Exception as _:
-                pass
-
-            biz_logger.info(
-                "sims.status patch iccid=%s from=%s to=%s user=%s",
-                iccid,
-                old_status,
-                new_status,
-                user["username"],
-            )
-
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            biz_logger.exception("DB ERROR on change_status")
-            raise HTTPException(status_code=500, detail="DB_ERROR")
-
+        cur.execute(
+            """
+            INSERT INTO sim_op_log (iccid, op_type, op_result, operator, created_at)
+            VALUES (%s, %s, %s, %s, NOW())
+            """,
+            (iccid, action, "SUCCESS" if changed else "NOOP", user["username"]),
+        )
+        conn.commit()
+    biz_logger.info(
+        "sims.status patch iccid=%s from=%s to=%s user=%s",
+        iccid,
+        old_status,
+        new_status,
+        user["username"],
+    )
     return ok({"iccid": iccid, "status": new_status})
 
 
@@ -186,6 +186,7 @@ def create_app():
 
     application = FastAPI(title="iot-sim-ops", version="0.4.0", lifespan=lifespan)
     application.middleware("http")(access_log_mw)
+    application.add_exception_handler(pymysql.MySQLError, database_error)
     # CORS defaults to a credential-free demo configuration. Set explicit origins
     # in .env before allowing browser credentials.
     application.add_middleware(

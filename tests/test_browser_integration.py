@@ -31,6 +31,8 @@ def web_server():
         "DB_USER": env.get("IOT_TEST_DB_USER", "root"),
         "DB_PASS": env.get("IOT_TEST_DB_PASS", ""),
         "DB_NAME": name,
+        "DB_POOL_ENABLED": "true",
+        "DB_SOCKET": "",
     })
     process = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "api.app:app", "--host", "127.0.0.1", "--port", str(port)],

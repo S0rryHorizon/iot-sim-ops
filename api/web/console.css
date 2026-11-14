@@ -95,6 +95,7 @@ button {
     background: var(--brand);
     color: #052e16;
     font-weight: 700;
+    white-space: nowrap;
     cursor: pointer
 }
 

@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import contextmanager
 from threading import Lock
@@ -12,6 +13,30 @@ from .schemas import parse_bool
 
 _pool = None
 _pool_lock = Lock()
+logger = logging.getLogger("biz")
+
+
+def http_error(error: pymysql.MySQLError) -> HTTPException:
+    # Deadlock victims and lock-wait timeouts were rolled back; the caller may retry.
+    busy = bool(error.args) and error.args[0] in (1213, 1205)
+    return HTTPException(status_code=503 if busy else 500, detail="DB_BUSY" if busy else "DB_ERROR")
+
+
+@contextmanager
+def rollback_on_error(connection):
+    try:
+        yield
+    except Exception as error:
+        try:
+            connection.rollback()
+        except pymysql.MySQLError:
+            # A dropped connection cannot roll back; the server already discarded the
+            # transaction, and the original error still decides the response.
+            logger.warning("Rollback failed on a broken connection")
+        if isinstance(error, pymysql.MySQLError):
+            logger.exception("Database transaction failed")
+            raise http_error(error) from error
+        raise
 
 
 def _open_connection():
@@ -26,6 +51,9 @@ def _open_connection():
         cursorclass=DictCursor,
         unix_socket=os.getenv("DB_SOCKET") or None,
         connect_timeout=5,
+        # Lock waits must end before read_timeout, so a busy row is reported as 1205
+        # (503 DB_BUSY) instead of a dropped connection.
+        init_command="SET SESSION innodb_lock_wait_timeout=5",
         read_timeout=10,
         write_timeout=10,
     )

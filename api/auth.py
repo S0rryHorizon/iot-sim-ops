@@ -38,8 +38,9 @@ def current_user(authorization: Optional[str] = Header(None)) -> dict:
     return require_auth_user(authorization)
 
 
-def require_owned_sim(cur, iccid, user_id, columns="owner_user_id"):
-    cur.execute(f"SELECT {columns} FROM sim_card WHERE iccid=%s", (iccid,))
+def require_owned_sim(cur, iccid, user_id, columns="owner_user_id", for_update=False):
+    lock = " FOR UPDATE" if for_update else ""
+    cur.execute(f"SELECT {columns} FROM sim_card WHERE iccid=%s{lock}", (iccid,))
     row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="not found")
@@ -50,7 +51,7 @@ def require_owned_sim(cur, iccid, user_id, columns="owner_user_id"):
 
 @router.post("/auth/login")
 def auth_login(body: Login):
-    with db.get_conn() as conn, conn.cursor() as cur:
+    with db.get_conn() as conn, db.rollback_on_error(conn), conn.cursor() as cur:
         cur.execute(
             "SELECT user_id, password_hash, is_active FROM user_account WHERE username=%s",
             (body.username,),
@@ -62,25 +63,18 @@ def auth_login(body: Login):
             raise HTTPException(status_code=401, detail="invalid credential")
 
         tok = secrets.token_hex(32)
-
-        try:
-            # appid 置 NULL 以避开外键（专用于“用户登录流”）
-            cur.execute(
-                """
-                INSERT INTO auth_token (token, user_id, appid, expires_at, created_at)
-                VALUES (%s, %s, %s, DATE_ADD(NOW(), INTERVAL 1 HOUR), NOW())
-                """,
-                (tok, user["user_id"], None),
-            )
-            cur.execute(
-                "UPDATE user_account SET last_login_at=NOW() WHERE user_id=%s",
-                (user["user_id"],),
-            )
-            conn.commit()
-            logger.info("auth.login ok user=%s", body.username)
-
-        except Exception:
-            conn.rollback()
-            logger.exception("DB ERROR on /auth/login")
-            raise HTTPException(status_code=500, detail="DB_ERROR")
+        # Acquire the parent X lock before the token's foreign-key check takes an S lock.
+        cur.execute(
+            "UPDATE user_account SET last_login_at=NOW() WHERE user_id=%s",
+            (user["user_id"],),
+        )
+        cur.execute(
+            """
+            INSERT INTO auth_token (token, user_id, appid, expires_at, created_at)
+            VALUES (%s, %s, %s, DATE_ADD(NOW(), INTERVAL 1 HOUR), NOW())
+            """,
+            (tok, user["user_id"], None),
+        )
+        conn.commit()
+    logger.info("auth.login ok user=%s", body.username)
     return ok({"token": tok, "token_type": "Bearer", "expires_in": 3600})
