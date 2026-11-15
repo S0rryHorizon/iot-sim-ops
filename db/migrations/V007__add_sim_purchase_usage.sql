@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS sim_usage (
       ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 操作日志：sim_op_log（可选；缺表也不会影响接口）
+-- 操作日志：sim_op_log（状态变更与写日志在同一事务内，缺表会导致停复机接口失败并回滚）
 CREATE TABLE IF NOT EXISTS sim_op_log (
   id         BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   iccid      VARCHAR(32)     NOT NULL,
