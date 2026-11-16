@@ -16,7 +16,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import auth, db, purchases
 from .auth import current_user, require_owned_sim
-from .schemas import ChangeStatus, ok, parse_bool, validated_month
+from .parsing import parse_bool
+from .schemas import ChangeStatus, ok, validated_month
 
 load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 

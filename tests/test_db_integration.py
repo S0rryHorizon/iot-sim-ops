@@ -2,6 +2,7 @@
 
 import os
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -570,6 +571,90 @@ def test_status_and_oplog_are_atomic(db_case):
     with case.connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT op_type, op_result FROM sim_op_log WHERE iccid=%s", (iccid,))
         assert cur.fetchall() == [{"op_type": "SUSPEND", "op_result": "SUCCESS"}]
+
+
+def test_concurrent_status_changes_match_successful_operations(db_case, monkeypatch):
+    case = db_case
+    iccid = case.make_card()
+    suspend_read = threading.Event()
+    resume_started = threading.Event()
+    resume_read = threading.Event()
+    release_suspend = threading.Event()
+    release_resume = threading.Event()
+    connection_ids = []
+
+    class StatusCursor(DictCursor):
+        def execute(self, query, args=None):
+            if not query.startswith("SELECT owner_user_id, status FROM sim_card") or args != (
+                iccid,
+            ):
+                return super().execute(query, args)
+            connection_ids.append(self.connection.thread_id())
+            first = len(connection_ids) == 1
+            if not first:
+                resume_started.set()
+            result = super().execute(query, args)
+            (suspend_read if first else resume_read).set()
+            assert (release_suspend if first else release_resume).wait(timeout=10)
+            return result
+
+    monkeypatch.setattr(db, "DictCursor", StatusCursor)
+    db.dispose_pool()
+
+    def change(action):
+        return case.client.patch(
+            f"/sims/{iccid}/status", json={"action": action}, headers=headers(case.alice)
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        try:
+            suspend = pool.submit(change, "SUSPEND")
+            assert suspend_read.wait(timeout=10)
+            resume = pool.submit(change, "RESUME")
+            assert resume_started.wait(timeout=10)
+            assert len(set(connection_ids)) == 2
+            # Keep SUSPEND's read open until RESUME either waits on its real row lock
+            # or reads the old state (the regression when FOR UPDATE is removed).
+            deadline = time.monotonic() + 3
+            with case.connect() as conn, conn.cursor() as cur:
+                while not resume_read.is_set():
+                    cur.execute(
+                        "SELECT 1 FROM performance_schema.data_lock_waits w "
+                        "JOIN performance_schema.threads t "
+                        "ON t.THREAD_ID=w.REQUESTING_THREAD_ID "
+                        "WHERE t.PROCESSLIST_ID=%s",
+                        (connection_ids[1],),
+                    )
+                    if cur.fetchone():
+                        break
+                    assert time.monotonic() < deadline, "RESUME never reached the contested read"
+                    resume_read.wait(timeout=0.01)
+            release_suspend.set()
+            suspended = suspend.result(timeout=10)
+            # Even without the lock, RESUME must finish after SUSPEND commits, so
+            # a stale ACTIVE read cannot hide behind a different serial ordering.
+            release_resume.set()
+            resumed = resume.result(timeout=10)
+        finally:
+            release_suspend.set()
+            release_resume.set()
+
+    responses = [("SUSPEND", suspended), ("RESUME", resumed)]
+    assert [response.status_code for _, response in responses] == [200, 200]
+    successful = [action for action, response in responses if response.status_code == 200]
+    with case.connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT op_type, op_result FROM sim_op_log WHERE iccid=%s ORDER BY id", (iccid,)
+        )
+        logs = cur.fetchall()
+    assert [log["op_type"] for log in logs] == successful
+    status = "ACTIVE"
+    for log, (_, response) in zip(logs, responses):
+        target = "SUSPENDED" if log["op_type"] == "SUSPEND" else "ACTIVE"
+        assert log["op_result"] == ("NOOP" if status == target else "SUCCESS")
+        assert response.json()["data"] == {"iccid": iccid, "status": target}
+        status = target
+    assert case.scalar("SELECT status FROM sim_card WHERE iccid=%s", (iccid,)) == status
 
 
 def test_repeated_status_is_audited_noop(db_case):

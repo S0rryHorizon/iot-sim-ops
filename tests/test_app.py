@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from api import app as app_module
 from api import auth, db, purchases, schemas
+from api.parsing import parse_bool
 
 
 def test_alive_payload():
@@ -78,17 +79,17 @@ def test_cors_origin_parser_trims_and_drops_empty_values():
 
 @pytest.mark.parametrize("value", ["true", "1", "YES", "on"])
 def test_boolean_parser_accepts_true_values(value):
-    assert app_module.parse_bool(value) is True
+    assert parse_bool(value) is True
 
 
 @pytest.mark.parametrize("value", ["false", "0", "NO", "off"])
 def test_boolean_parser_accepts_false_values(value):
-    assert app_module.parse_bool(value) is False
+    assert parse_bool(value) is False
 
 
 def test_boolean_parser_rejects_unknown_value():
     with pytest.raises(ValueError):
-        app_module.parse_bool("sometimes")
+        parse_bool("sometimes")
 
 
 def test_missing_bearer_token_is_rejected_without_database_access(monkeypatch):

@@ -9,7 +9,7 @@ from pymysql.cursors import DictCursor
 from sqlalchemy.exc import TimeoutError as PoolTimeout
 from sqlalchemy.pool import QueuePool
 
-from .schemas import parse_bool
+from .parsing import parse_bool
 
 _pool = None
 _pool_lock = Lock()
